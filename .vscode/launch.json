@@ -1,0 +1,139 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Hunyuan3D Batch",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/infer_.py",
+            "console": "integratedTerminal",
+            "python": "/mnt/data/users/haiming.zhu/miniconda3/envs/shoi/bin/python", // 替换为你的 Python 解释器路径
+            "args": [
+                "--image_paths",
+                "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/examples/325_cropped_hoi_1.png",
+                // "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/output_meshes/2025-10-11_22-18-04_408204/rembg_1_removed_bg.png",
+                "--mesh_path",
+                "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj",
+                "--moge_path",
+                "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1/pointcloud.ply",
+                "--moge_hand_path",
+                "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_hand_depth/325_cropped_hoi_1/pointcloud.ply",
+                "--output_dir",
+                "output_meshes",
+                "--device",
+                "cuda"
+                ],
+            "env": {"PYTHONPATH": "${workspaceFolder}"},
+            "justMyCode": true // 允许调试第三方库（如 hy3dgen）
+        },
+        {
+            "name": "Python Debugger: Train Single GPU",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",   // 训练脚本路径
+            "console": "integratedTerminal",
+            "python": "/mnt/data/users/haiming.zhu/miniconda3/envs/shoi/bin/python",
+            "args": [
+                "--num_nodes", "1",
+                "--num_gpus", "1",
+                "--config", "${workspaceFolder}/configs/hunyuandit-mini-overfitting-flowmatching-dinol518-bf16-lr1e4-4096.yaml",
+                "--output_dir", "${workspaceFolder}/output_folder/dit/overfitting_depth_16_token_4096_lr1e4"
+            ],
+            "env": {
+                "HF_HUB_OFFLINE": "0",
+                "MASTER_PORT": "12348"
+            }
+        },
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "python": "/mnt/data/users/haiming.zhu/miniconda3/envs/shoi/bin/python", // 替换为你的 Python 解释器路径
+        },
+        {
+            "name": "Python: Single Image Mode",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/infer_2.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--input_image",
+                "./examples/325_cropped_hoi_1.png", // 替换为你的图像路径
+                "--input_image2",
+                "./examples/325_cropped_hoi_1_h.png", // 替换为你的图像路径
+                "--output-format",
+                "ply",
+                // "--enable_tex",
+                "--device",
+                "cuda", // 根据你的硬件改为 "cpu" 或 "mps" 如果需要
+                "--steps",
+                "20",
+                "--guidance_scale",
+                "5.5",
+                "--octree_resolution",
+                "256",
+                "--check_box_rembg"
+            ],
+            "python": "/mnt/data/users/haiming.zhu/miniconda3/envs/shoi/bin/python", // 替换为你的 Python 解释器路径
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false // 允许调试第三方库（如 hy3dgen）
+        },
+        {
+            "name": "Python: Multi-View Mode",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/infer_grok.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--mv_image_front",
+                "/path/to/front.png", // 替换为你的前视图图像路径
+                "--mv_image_back",
+                "/path/to/back.png", // 替换为你的后视图图像路径
+                "--mv_image_left",
+                "/path/to/left.png", // 替换为你的左视图图像路径
+                "--mv_image_right",
+                "/path/to/right.png", // 替换为你的右视图图像路径
+                "--model_path",
+                "tencent/Hunyuan3D-2mini-mv",
+                "--output-format",
+                "ply",
+                // "--enable_tex",
+                "--device",
+                "cuda",
+                "--check_box_rembg"
+            ],
+            "python": "${workspaceFolder}/.venv/bin/python", // 替换为你的 Python 解释器路径
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Python: Text-to-3D Mode",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/infer_grok.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--caption",
+                "a futuristic robot",
+                "--enable_t23d",
+                "--output-format",
+                "ply",
+                // "--enable_tex",
+                "--device",
+                "cuda",
+                "--check_box_rembg"
+            ],
+            "python": "${workspaceFolder}/.venv/bin/python", // 替换为你的 Python 解释器路径
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false
+        }
+    ]
+}
