@@ -931,6 +931,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                     latents = outputs.prev_sample
 
                     if i == 8:
+                        pbar.close()  # <--- 关闭 tqdm
                         # ---------- 导出 mesh ----------
                         mesh_i = self._export(
                             outputs.pred_original_sample,
@@ -943,8 +944,8 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                         )  # 这里导出的是 x_0 的 mesh, 会进行一次的decoding
 
                         # ---------- 可视化中间 mesh ----------
-                        vis_mid_mesh = True
-                        if vis_mid_mesh:    
+                        vis_test_decoding = True
+                        if vis_test_decoding:    
                             dir = "vis_phase1_mid_mesh"
                             if not os.path.exists(dir):
                                 os.makedirs(dir, exist_ok=True)
@@ -955,7 +956,6 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                             else:
                                 mesh_i.export(f"{dir}/check_step10_{time.time()}.glb")
 
-                        pbar.close()  # <--- 关闭 tqdm
                         print(f"Inversion Stage: Start registration + inversion...")
 
                         # ---------- registration ----------
@@ -994,7 +994,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             # self.scheduler._step_index = None  # reset step index for Phase 2
 
             # ---------- 第二次 sampling ----------
-            double_branch = False
+            double_branch = True
             if double_branch:
                 # latents = torch.cat([latents] * 2, dim=0)
                 # cond = {
@@ -1004,7 +1004,8 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                 latents = torch.cat([latents] * 3, dim=0)
                 cond = cond
             else:
-                cond = cond_ref
+                cond = cond_hoi
+                # cond['main'] = torch.cat([cond['main'][[-1], ...], cond['main'][:-1]], dim=0)  # only keep object cond
 
             for i, t in enumerate(tqdm(timesteps, disable=not enable_pbar, desc="(Phase 2) Full Sampling:")):
                 if do_classifier_free_guidance:
@@ -1092,8 +1093,8 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         cond_hand = copy.deepcopy(cond)
 
         if do_classifier_free_guidance:
-            # cond_hand = cond   # cond, uncond
-            cond_hand['main'] = torch.cat([cond['main'][[-1], :, :], cond['main'][[-1], :, :]], dim=0)     # uncond, uncond
+            cond_hand = cond   # cond, uncond   # 文本好用
+            # cond_hand['main'] = torch.cat([cond['main'][[-1], :, :], cond['main'][[-1], :, :]], dim=0)     # uncond, uncond
         else:
             cond_hand = [cond['main'][[-1], :, :]]  # uncond only
             # cond_hand = [cond['main'][[0], :, :]]  # cond only
@@ -1163,8 +1164,8 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             latents = self.vae.scale_factor * latents
             
             # ---------- test hamer encode and decode result ----------
-            test_encode_decode = True
-            if test_encode_decode:
+            vis_test_decoding = False
+            if vis_test_decoding:
                 import time
                 latents_rec = 1. / self.vae.scale_factor * latents.clone().detach()
                 latents_rec = self.vae(latents_rec)
@@ -1226,7 +1227,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             source_mesh_path=hamer_mesh,
             target_mesh_path=moge_hand_pointmap,
             skip_coarse=True,
-            transformed_mesh_path="hand_registered.glb"
+            # transformed_mesh_path="hand_registered.glb"
         )
 
         # To, from hunyuan generated mesh to Moge pointmap
@@ -1235,7 +1236,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             source_mesh=hunyuan_mesh,
             target_mesh_path=moge_pointmap,
             skip_coarse=True,
-            transformed_mesh_path="hunyuan_registered.glb"
+            # transformed_mesh_path="hunyuan_registered.glb"
         )
 
         return Th, To
