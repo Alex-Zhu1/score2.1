@@ -93,7 +93,9 @@ class ImageEncoder(nn.Module):
     def forward(self, image, mask=None, value_range=(-1, 1), **kwargs):
         if value_range is not None:
             low, high = value_range
-            image = (image - low) / (high - low)
+            # 仅当检测到图像中存在明显负值才进行归一化
+            if image.min() < -1e-3 or image.max() > 1 + 1e-3:
+                image = (image - low) / (high - low)
 
         image = image.to(self.model.device, dtype=self.model.dtype)
         inputs = self.transform(image)

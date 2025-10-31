@@ -832,56 +832,95 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             self.model.guidance_embed is True
         )
 
-        ## 1. batch infer ------
-        # images = [image]
-        # has_hand = hand_image is not None
-        # has_object = object_image is not None
-        # # has_hand = False
-        # # has_object = False
-        # if has_hand:
-        #     images.append(hand_image)
-        # if has_object:
-        #     images.append(object_image)
+        # ## 1. Prepare cond inputs
+        images = [image]
+        image_copy = copy.deepcopy(image)
+        has_hand = hand_image is not None
+        has_object = object_image is not None
+        # has_hand = False
+        # has_object = False
+        if has_hand:
+            images.append(hand_image)
+        if has_object:
+            images.append(object_image)
 
-        # cond_inputs = self.prepare_image(images, mask)  # 这里有个问题是，这个prepare会把img都中心化，那么位置对应不上
-        # cond_ref = self.prepare_image(ref, mask)
+        cond_inputs = self.prepare_image(images, mask)  # 这里有个问题是，这个prepare会把img都中心化，那么位置对应不上
+        cond_ref = self.prepare_image(ref, mask)
 
-        # ############ DEBUG 保存 cond_inputs ############
-        # self.visualize_cond_inputs(cond_inputs, save_dir="cond_inputs_vis")
-        # self.visualize_cond_inputs(cond_ref, save_dir="cond_ref_vis")
-        # ############ DEBUG end ############
+        ############ DEBUG 保存 cond_inputs ############
+        self.visualize_cond_inputs(cond_inputs, save_dir="cond_inputs_vis")
+        self.visualize_cond_inputs(cond_ref, save_dir="cond_ref_vis")
+        ############ DEBUG end ############
 
-        # image = cond_inputs.pop('image')
-        # cond = self.encode_cond(
-        #     image=image,
-        #     additional_cond_inputs=cond_inputs,
-        #     do_classifier_free_guidance=do_classifier_free_guidance,
-        #     dual_guidance=False,
-        # )
+        # do_classifier_free_guidance = False
 
-        # ref_image = cond_ref.pop('image')
-        # cond_ref = self.encode_cond(
-        #     image=ref_image,
-        #     additional_cond_inputs=cond_ref,
-        #     do_classifier_free_guidance=do_classifier_free_guidance,
-        #     dual_guidance=False,
-        # )
+        image = cond_inputs.pop('image')
+        cond = self.encode_cond(
+            image=image,
+            additional_cond_inputs=cond_inputs,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            dual_guidance=False,
+        )
 
-        # cond_hoi = cond  # 默认只有hoi cond
+        ref_image = cond_ref.pop('image')
+        cond_ref = self.encode_cond(
+            image=ref_image,
+            additional_cond_inputs=cond_ref,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            dual_guidance=False,
+        )
 
-        # if has_hand:
-        #     num_images = len(images)
-        #     cfg_offset = num_images if do_classifier_free_guidance else 0
-        #     cond_hoi = copy.deepcopy(cond)
-        #     cond_hoi['main'] = cond_hoi['main'][[0, cfg_offset], ...]  # only keep image cond (corrected comment)
-        #     cond_hand = copy.deepcopy(cond)
-        #     cond_hand['main'] = cond_hand['main'][[1, 1 + cfg_offset], ...]  # only keep hand cond (corrected comment)
-        #     if has_object:
-        #         cond_object = copy.deepcopy(cond)
-        #         cond_object['main'] = cond_object['main'][[2, 2 + cfg_offset], ...]  # only keep object cond
-        ########------ end 1. batch infer ----------
-                ## 1. Prepare cond inputs - 串行版本.可以确认串行计算出来的dino特征到hunyuan结果是保持不变的，但是并行输入进去会有差异
-        images_dict = {'image': image}
+        cond_hoi = cond  # 默认只有hoi cond
+
+        if has_hand:
+            num_images = len(images)
+            cfg_offset = num_images if do_classifier_free_guidance else 0
+            cond_hoi = copy.deepcopy(cond)
+            cond_hoi['main'] = cond_hoi['main'][[0, cfg_offset], ...]  # only keep image cond (corrected comment)
+            cond_hand = copy.deepcopy(cond)
+            cond_hand['main'] = cond_hand['main'][[1, 1 + cfg_offset], ...]  # only keep hand cond (corrected comment)
+            if has_object:
+                cond_object = copy.deepcopy(cond)
+                cond_object['main'] = cond_object['main'][[2, 2 + cfg_offset], ...]  # only keep object cond
+        ########
+        def compare_tensors(t1, t2, name, atol=1e-5):
+            if t1 is None or t2 is None:
+                print(f"{name}: One of the tensors is None.")
+                return
+            if not isinstance(t1, torch.Tensor) or not isinstance(t2, torch.Tensor):
+                print(f"{name}: Not both tensors.")
+                return
+
+            if t1.shape != t2.shape:
+                print(f"{name} shapes differ! {t1.shape} vs {t2.shape}")
+                return
+
+            diff = torch.abs(t1 - t2)
+            max_diff = diff.max().item()
+            mean_diff = diff.mean().item()
+            std_diff = diff.std().item()
+
+            cos_sim = torch.nn.functional.cosine_similarity(
+                t1.flatten().float(), t2.flatten().float(), dim=0
+            ).item()
+
+            l2_dist = torch.norm(t1.float() - t2.float()) / torch.norm(t1.float())
+
+            print(f"\n=== {name} ===")
+            print(f"Max diff: {max_diff:.6f}")
+            print(f"Mean diff: {mean_diff:.6f}")
+            print(f"Std diff: {std_diff:.6f}")
+            print(f"Cosine similarity: {cos_sim:.6f}")
+            print(f"Relative L2 distance: {l2_dist:.6f}")
+
+            if torch.allclose(t1, t2, atol=atol):
+                print("✅ Within tolerance — tensors effectively identical.\n")
+            else:
+                print("⚠️  Not identical within tolerance.\n")
+
+
+        ## 1. Prepare cond inputs - 串行版本.可以确认串行计算出来的dino特征到hunyuan结果是保持不变的，但是并行输入进去会有差异
+        images_dict = {'image': image_copy}
         if hand_image is not None:
             images_dict['hand'] = hand_image
         if object_image is not None:
@@ -891,9 +930,11 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         cond_features = {}
         for name, img in images_dict.items():
             cond_input = self.prepare_image([img], mask)
-
+            if name == 'hand':
+                hand_img1 = cond_input['image']
+                compare_tensors(hand_img1, image[1:2,:, :, :], f"Hand Image Tensor")
             ############ DEBUG 保存 cond_inputs ############
-            # self.visualize_cond_inputs(cond_input, save_dir=f"cond_{name}_vis")
+            self.visualize_cond_inputs(cond_input, save_dir=f"cond_{name}_vis")
             ############ DEBUG end ############
             
             img_tensor = cond_input.pop('image')
@@ -906,7 +947,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
 
         # 处理参考图片
         cond_ref_input = self.prepare_image(ref, mask)
-        # self.visualize_cond_inputs(cond_ref_input, save_dir="cond_ref_vis")
+        self.visualize_cond_inputs(cond_ref_input, save_dir="cond_ref_vis")
         ref_image = cond_ref_input.pop('image')
         cond_ref = self.encode_cond(
             image=ref_image,
@@ -916,15 +957,12 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         )
 
         # 组合条件特征
-        cond_hoi = cond_features['image']
-        cond_hand = cond_features.get('hand', None)
-        cond_object = cond_features.get('object', None)
-
-        cond = copy.deepcopy(cond_ref)
-        cond['main'] = torch.cat(
-                    [v['main'][i:i+1, ...] for i in range(2) for v in [cond_hoi, cond_hand, cond_object] if v is not None],
-                    dim=0
-                )
+        cond_hoi1 = cond_features['image']
+        cond_hand2 = cond_features.get('hand', None)
+        cond_object3 = cond_features.get('object', None)
+        compare_tensors(cond_hoi1['main'], cond_hoi['main'], "HOI Main Feature")
+        compare_tensors(cond_hand2['main'], cond_hand['main'], "Hand Main Feature")
+        compare_tensors(cond_object3['main'], cond_object['main'], "Object Main Feature")
 
 
         batch_size = 1  # 固定成1个batch进行
@@ -949,6 +987,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         )
 
         latents = self.prepare_latents(batch_size, dtype, device, generator)
+        latenss = latents.clone()
 
         # guidance 一直是None
         guidance = None
@@ -967,7 +1006,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
 
                     timestep = t.expand(latent_model_input.shape[0]).to(latents.dtype)
                     timestep = timestep / phase1_scheduler.config.num_train_timesteps
-                    noise_pred = self.model(latent_model_input, timestep, cond_ref, guidance=guidance)  # 我们需要registration, 所以用hoi cond. 如果对齐hand 位置，会发现生成+decoding出来的mesh, 被拉伸了
+                    noise_pred = self.model(latent_model_input, timestep, cond_hand, guidance=guidance)  # 我们需要registration, 所以用hoi cond. 如果对齐hand 位置，会发现生成+decoding出来的mesh, 被拉伸了
 
                     if do_classifier_free_guidance:
                         noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
@@ -1005,42 +1044,94 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                         print(f"Inversion Stage: Start registration + inversion...")
 
                         # ---------- registration ----------
-                        Th, To = self.registration(
-                            hunyuan_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
-                            hamer_mesh=mesh_path,
-                            moge_pointmap=moge_path,
-                            moge_hand_pointmap=moge_hand_path
-                        )
+                        # Th, To = self.registration(
+                        #     hunyuan_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
+                        #     hamer_mesh=mesh_path,
+                        #     moge_pointmap=moge_path,
+                        #     moge_hand_pointmap=moge_hand_path
+                        # )
 
-                        # ---------- inversion ----------
-                        inversion = True if mesh_path is not None else False
-                        latents = self.inversion(
-                            mesh_path=mesh_path,
-                            Th=Th,
-                            To=To,
-                            device=device,
-                            batch_size=batch_size,
-                            inversion=inversion,
-                            box_v=box_v,
-                            octree_resolution=octree_resolution,
-                            mc_level=mc_level,
-                            num_chunks=num_chunks,
-                            mc_algo=mc_algo,
-                            enable_pbar=enable_pbar,
-                            cond=cond_hand,  # 是对hamer的hand mesh做inversion, 所以inversion过程只用cond hand
-                            num_inference_steps=num_inference_steps,
-                            timesteps=timesteps,
-                            do_classifier_free_guidance=do_classifier_free_guidance,
-                            guidance_scale=guidance_scale,
-                            generator=generator,
-                        )
+                        # # ---------- inversion ----------
+                        # inversion = True if mesh_path is not None else False
+                        # latents = self.inversion(
+                        #     mesh_path=mesh_path,
+                        #     Th=Th,
+                        #     To=To,
+                        #     device=device,
+                        #     batch_size=batch_size,
+                        #     inversion=inversion,
+                        #     box_v=box_v,
+                        #     octree_resolution=octree_resolution,
+                        #     mc_level=mc_level,
+                        #     num_chunks=num_chunks,
+                        #     mc_algo=mc_algo,
+                        #     enable_pbar=enable_pbar,
+                        #     cond=cond_hand,  # 是对hamer的hand mesh做inversion, 所以inversion过程只用cond hand
+                        #     num_inference_steps=num_inference_steps,
+                        #     timesteps=timesteps,
+                        #     do_classifier_free_guidance=do_classifier_free_guidance,
+                        #     guidance_scale=guidance_scale,
+                        #     generator=generator,
+                        # )
                         break  # 结束第一次采样循环
+
             del outputs, mesh_i
             torch.cuda.empty_cache()
             # self.scheduler._step_index = None  # reset step index for Phase 2
 
+        latents = latenss.clone()  # 第二阶段从最初的噪声开始采样
+        with synchronize_timer('Diffusion Sampling'):
+            if do_inversion_stage:   # <--- ✅ 控制是否执行第一阶段 + inversion
+                # ---------- 第一次 sampling ----------
+                pbar = tqdm(timesteps_phase1, disable=not enable_pbar, desc="(Phase 1) Partial Sampling + Inversion:")
+                for i, t in enumerate(pbar):
+                    if do_classifier_free_guidance:
+                        latent_model_input = torch.cat([latents] * 2)
+                    else:
+                        latent_model_input = latents
+
+                    timestep = t.expand(latent_model_input.shape[0]).to(latents.dtype)
+                    timestep = timestep / self.scheduler.config.num_train_timesteps
+                    noise_pred = self.model(latent_model_input, timestep, cond_hand2, guidance=guidance)  # 我们需要registration, 所以用hoi cond. 如果对齐hand 位置，会发现生成+decoding出来的mesh, 被拉伸了
+
+                    if do_classifier_free_guidance:
+                        noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+                    outputs = self.scheduler.step(noise_pred, t, latents)
+                    latents = outputs.prev_sample
+
+                    if i == 8:
+                        pbar.close()  # <--- 关闭 tqdm
+                        # ---------- 导出 mesh ----------
+                        mesh_i = self._export(
+                            outputs.pred_original_sample,
+                            box_v=box_v,
+                            mc_level=mc_level,
+                            num_chunks=num_chunks,
+                            octree_resolution=octree_resolution,
+                            mc_algo=mc_algo,
+                            enable_pbar=enable_pbar,
+                        )  # 这里导出的是 x_0 的 mesh, 会进行一次的decoding
+
+                        # ---------- 可视化中间 mesh ----------
+                        vis_test_decoding = True
+                        if vis_test_decoding:    
+                            dir = "vis_phase1_mid_mesh"
+                            if not os.path.exists(dir):
+                                os.makedirs(dir, exist_ok=True)
+                            import time
+                            if isinstance(mesh_i, list):
+                                for midx, m in enumerate(mesh_i):
+                                    m.export(f"{dir}/_hand1_check_step10_{midx}_{time.time()}.glb")
+                            else:
+                                mesh_i.export(f"{dir}/check_step10_{time.time()}.glb")
+
+                        print(f"Inversion Stage: Start registration + inversion...")
+
+
             # ---------- 第二次 sampling ----------
-            double_branch = True
+            double_branch = False
             if double_branch:
                 # latents = torch.cat([latents] * 2, dim=0)
                 # cond = {
