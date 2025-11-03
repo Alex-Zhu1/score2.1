@@ -832,58 +832,46 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             self.model.guidance_embed is True
         )
 
-        # ========== 1. 准备所有条件特征（batch infer） ==========
-        images = [image]
-        has_hand = hand_image is not None
-        has_object = object_image is not None
-        
-        if has_hand:
-            images.append(hand_image)
-        if has_object:
-            images.append(object_image)
+        # ========== 准备条件特征 ==========
+        images_dict = {'image': image}
+        if hand_image is not None:
+            images_dict['hand'] = hand_image
+        if object_image is not None:
+            images_dict['object'] = object_image
 
-        cond_inputs = self.prepare_image(images, mask)
-        cond_ref = self.prepare_image(ref, mask)
+        cond_features = {}
+        for name, img in images_dict.items():
+            cond_input = self.prepare_image([img], mask)
+            img_tensor = cond_input.pop('image')
+            cond_features[name] = self.encode_cond(
+                image=img_tensor,
+                additional_cond_inputs=cond_input,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+                dual_guidance=False,
+            )
 
-        # DEBUG 保存 cond_inputs (可选)
-        # self.visualize_cond_inputs(cond_inputs, save_dir="cond_inputs_vis")
-        # self.visualize_cond_inputs(cond_ref, save_dir="cond_ref_vis")
-
-        # 编码所有条件
-        image_tensor = cond_inputs.pop('image')
-        cond_all = self.encode_cond(
-            image=image_tensor,
-            additional_cond_inputs=cond_inputs,
-            do_classifier_free_guidance=do_classifier_free_guidance,
-            dual_guidance=False,
-        )
-
-        ref_image = cond_ref.pop('image')
-        cond_ref_encoded = self.encode_cond(
+        cond_ref_input = self.prepare_image(ref, mask)
+        ref_image = cond_ref_input.pop('image')
+        cond_ref = self.encode_cond(
             image=ref_image,
-            additional_cond_inputs=cond_ref,
+            additional_cond_inputs=cond_ref_input,
             do_classifier_free_guidance=do_classifier_free_guidance,
             dual_guidance=False,
         )
 
-        # 🔧 提取各个分支的条件（创建独立副本，避免相互影响）
-        num_images = len(images)
-        cfg_offset = num_images if do_classifier_free_guidance else 0
-        
-        cond_hoi = copy.deepcopy(cond_all)
-        cond_hoi['main'] = cond_all['main'][[0, cfg_offset], ...].clone()
-        
-        cond_hand = None
-        cond_object = None
-        if has_hand:
-            cond_hand = copy.deepcopy(cond_all)
-            cond_hand['main'] = cond_all['main'][[1, 1 + cfg_offset], ...].clone()
-        if has_object:
-            cond_object = copy.deepcopy(cond_all)
-            cond_object['main'] = cond_all['main'][[2, 2 + cfg_offset], ...].clone()
+        cond_hoi = cond_features['image']
+        cond_hand = cond_features.get('hand', None)
+        cond_object = cond_features.get('object', None)
 
-        # ========== 2. 准备 timesteps 和 latents ==========
+        cond = copy.deepcopy(cond_ref)
+        cond['main'] = torch.cat(
+            [v['main'][i:i+1, ...] for i in range(2) for v in [cond_hoi, cond_hand, cond_object] if v is not None],
+            dim=0
+        )
+
         batch_size = 1
+
+        # ========== 准备 timesteps（两个阶段共用同一组） ==========
         sigmas = np.linspace(0, 1, num_inference_steps) if sigmas is None else sigmas
         
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -893,24 +881,22 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             sigmas=sigmas,
         )
 
+        # ========== 准备初始 latents ==========
         latents = self.prepare_latents(batch_size, dtype, device, generator)
 
+        # ========== Guidance 准备 ==========
         guidance = None
         if hasattr(self.model, 'guidance_embed') and self.model.guidance_embed is True:
             guidance = torch.tensor([guidance_scale] * batch_size, device=device, dtype=dtype)
 
         # ========== Phase 1: Inversion Stage ==========
         if do_inversion_stage:
+            # 🔧 创建独立的 Phase 1 scheduler（避免污染）
             phase1_scheduler = copy.deepcopy(self.scheduler)
-            timesteps_phase1 = timesteps.clone()
-            
-            # 🔧 Phase 1 使用 cond_ref
-            cond_phase1 = copy.deepcopy(cond_ref_encoded)
+            timesteps_phase1 = timesteps.clone()  # 使用相同的 timesteps
             
             with synchronize_timer('Phase 1: Partial Sampling + Inversion'):
-                pbar = tqdm(timesteps_phase1, disable=not enable_pbar, 
-                           desc="(Phase 1) Partial Sampling + Inversion:")
-                
+                pbar = tqdm(timesteps_phase1, disable=not enable_pbar, desc="(Phase 1) Partial Sampling + Inversion:")
                 for i, t in enumerate(pbar):
                     if do_classifier_free_guidance:
                         latent_model_input = torch.cat([latents] * 2)
@@ -920,7 +906,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                     timestep = t.expand(latent_model_input.shape[0]).to(latents.dtype)
                     timestep = timestep / phase1_scheduler.config.num_train_timesteps
                     
-                    noise_pred = self.model(latent_model_input, timestep, cond_phase1, guidance=guidance)
+                    noise_pred = self.model(latent_model_input, timestep, cond_ref, guidance=guidance)
 
                     if do_classifier_free_guidance:
                         noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
@@ -932,6 +918,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                     if i == 9:  # 在第 10 步停止
                         pbar.close()
                         
+                        # 导出中间 mesh
                         mesh_i = self._export(
                             outputs.pred_original_sample,
                             box_v=box_v,
@@ -945,14 +932,14 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                         # 可视化（可选）
                         if enable_pbar:
                             print(f"[Phase 1] Exporting intermediate mesh at step {i+1}")
-                            dir_path = "vis_phase1_mid_mesh"
-                            os.makedirs(dir_path, exist_ok=True)
+                            dir = "vis_phase1_mid_mesh"
+                            os.makedirs(dir, exist_ok=True)
                             import time
                             if isinstance(mesh_i, list):
                                 for midx, m in enumerate(mesh_i):
-                                    m.export(f"{dir_path}/check_step10_{midx}_{time.time()}.glb")
+                                    m.export(f"{dir}/check_step10_{midx}_{time.time()}.glb")
                             else:
-                                mesh_i.export(f"{dir_path}/check_step10_{time.time()}.glb")
+                                mesh_i.export(f"{dir}/check_step10_{time.time()}.glb")
 
                         # Registration
                         print(f"[Phase 1] Start registration + inversion...")
@@ -964,7 +951,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                         )
 
                         # Inversion
-                        inversion = mesh_path is not None
+                        inversion = True if mesh_path is not None else False
                         latents = self.inversion(
                             mesh_path=mesh_path,
                             Th=Th,
@@ -986,36 +973,33 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                             generator=generator,
                         )
                         
-                        # 清理 Phase 1 资源
-                        del outputs, mesh_i, phase1_scheduler, cond_phase1
+                        # 🔧 清理 Phase 1 资源
+                        del outputs, mesh_i, phase1_scheduler
                         torch.cuda.empty_cache()
                         torch.cuda.synchronize()
                         break
 
-        # 🔧 重置 scheduler 状态
+        # 🔧 重置 scheduler 状态（关键！）
         self.scheduler._step_index = None
-        if hasattr(self.scheduler, 'timesteps'):
-            self.scheduler.timesteps = None
+        # if hasattr(self.scheduler, 'timesteps'):
+        #     self.scheduler.timesteps = None
+        
+        # ---------- 第二次 sampling ----------
+        double_branch = False
+        if double_branch:
+            # latents = torch.cat([latents] * 2, dim=0)
+            # cond = {
+            #     'main': torch.cat([cond_hoi['main'], cond_hand['main']], dim=0)
+            # }
+
+            latents = torch.cat([latents] * 3, dim=0)
+            cond = cond
+        else:
+            # cond = cond_hand
+            cond = cond_hoi
+            # cond['main'] = torch.cat([cond['main'][[-1], ...], cond['main'][:-1]], dim=0)  # only keep object cond
         
         # ========== Phase 2: Full Sampling ==========
-        # 🔧 构建 Phase 2 的条件（独立于 Phase 1）
-        double_branch = True
-        if double_branch:
-            # 扩展 latents 到 3 个分支
-            latents = torch.cat([latents] * 3, dim=0)
-            
-            # 🔧 重新组合条件（使用之前保存的独立副本）
-            cond_phase2 = {
-                'main': torch.cat([
-                    cond_hoi['main'],
-                    cond_hand['main'] if cond_hand is not None else cond_hoi['main'],
-                    cond_object['main'] if cond_object is not None else cond_hoi['main']
-                ], dim=0)
-            }
-        else:
-            # 单分支模式
-            cond_phase2 = copy.deepcopy(cond_hand if cond_hand is not None else cond_hoi)
-        
         with synchronize_timer('Phase 2: Full Sampling'):
             for i, t in enumerate(tqdm(timesteps, disable=not enable_pbar, desc="(Phase 2) Full Sampling:")):
                 if do_classifier_free_guidance:
@@ -1026,7 +1010,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                 timestep = t.expand(latent_model_input.shape[0]).to(latents.dtype)
                 timestep = timestep / self.scheduler.config.num_train_timesteps
                 
-                noise_pred = self.model(latent_model_input, timestep, cond_phase2, guidance=guidance)
+                noise_pred = self.model(latent_model_input, timestep, cond, guidance=guidance)
 
                 if do_classifier_free_guidance:
                     noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
@@ -1201,7 +1185,6 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             
 
             # latents = latents * 1.15 # latent_nudging_scalar, 能完美重建，但是会影响full 分支
-            # latents = latents * 1.05
             # ---------- inversion loop ----------
             latents = self.inversion_loop(
                 latents,
@@ -1213,17 +1196,9 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                 timesteps=timesteps,
                 generator=generator,
             )
-            # latents = 1. / 1.15 * latents
 
             if latents.shape[0] == 1:
                 latentss = latents
-            # else:
-            #     if latents.shape[0] != batch_size:
-            #         if latents.shape[0] == 1:
-            #             latentss = latents.expand(batch_size, *latents.shape[1:])
-            #         else:
-            #             # Repeat if batch size is incompatible
-            #             latentss = latents.repeat((batch_size // latents.shape[0] + 1), 1, 1)[:batch_size]
         else:
             if enable_pbar:
                 print("[inversion] Skipping inversion; generating random latents.")
@@ -1261,11 +1236,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             cond_inputs (dict): 包含 'image' 和 'mask' 的 tensor
             save_dir (str): 保存图片的目录
         """
-        
-        # import os
-        # import torch
-        # import numpy as np
-        # from PIL import Image
+
         os.makedirs(save_dir, exist_ok=True)
 
         def tensor_to_numpy(tensor):
