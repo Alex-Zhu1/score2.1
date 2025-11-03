@@ -36,6 +36,8 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from diffusers.utils import BaseOutput, logging
 
+import pyrender
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
@@ -247,6 +249,8 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         model_output: torch.FloatTensor,
         timestep: Union[float, torch.FloatTensor],
         sample: torch.FloatTensor,
+        _export: Callable,
+        To: torch.Tensor,
         s_churn: float = 0.0,
         s_tmin: float = 0.0,
         s_tmax: float = float("inf"),
@@ -313,6 +317,47 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         pred_original_sample = sample + (1.0 - sigma) * model_output
         pred_original_sample = pred_original_sample.to(model_output.dtype)
 
+        guidance_2D = False
+        if guidance_2D:
+            # 2D signal for guidance
+            # 1 set optimization params
+            para_velocity = model_output.clone().detach().requires_grad_(True)
+
+            scale = torch.ones(3, requires_grad=True)            # (sx, sy, sz)
+            rotation = torch.eye(3, requires_grad=True)          # 初始单位旋转
+            translation = torch.zeros(3, requires_grad=True)     # 初始平移
+
+            def build_mesh_transform(scale, rotation, translation):
+                # Apply scale to rotation (缩放 + 旋转)
+                SR = torch.diag(scale) @ rotation  # 3×3
+                # Build 4×4 transform
+                transform = torch.eye(4)
+                transform[:3, :3] = SR
+                transform[:3, 3] = translation
+                return transform
+
+            para_Tp = build_mesh_transform(scale, rotation, translation)
+
+            optimizer = torch.optim.Adam([
+                    {'params': [scale], 'lr': 0.01},
+                    {'params': [translation], 'lr': 0.01},
+                    {'params': [rotation], 'lr': 0.5},
+                    {'params': [para_velocity], 'lr': 0.0001},
+                ])
+
+            for opt_step in range(50):
+                optimizer.zero_grad()
+                
+                x1 = sample + (1.0 - sigma) * para_velocity
+                # 解码
+                mesh_x1 =   _export(x1)
+                mesh_x1.apply_transform(para_Tp)
+                mesh_x1.apply_transform(To)
+                # 渲染
+                rend_x1 = self.render_mesh(mesh_x1, image_size=224)
+
+
+
         # upon completion increase step index by one
         self._step_index += 1
 
@@ -325,6 +370,122 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
     def __len__(self):
         return self.config.num_train_timesteps
 
+    
+    def render_maps(
+            self,
+            mesh,
+            focal_length: float,
+            render_res: Tuple[int, int] = (224, 224),
+            scene_bg_color: Tuple[int, int, int] = (0, 0, 0),
+        ):
+        """
+        渲染白模的 normal map, disparity map 和 silhouette
+        
+        Returns:
+            normal_map: (H, W, 3) 世界空间的法线图，范围 [0, 1]
+            disparity_map: (H, W) 视差图
+            silhouette: (H, W) 二值轮廓图
+        """
+        renderer = pyrender.OffscreenRenderer(
+            viewport_width=render_res[0],
+            viewport_height=render_res[1],
+            point_size=1.0
+        )
+        
+        # 设置相机
+        camera_pose = np.eye(4)
+        camera_center = [render_res[0] / 2., render_res[1] / 2.]
+        camera = pyrender.IntrinsicsCamera(
+            fx=focal_length, 
+            fy=focal_length,
+            cx=camera_center[0], 
+            cy=camera_center[1], 
+            zfar=1e12
+        )
+        
+        # ===== 1. 渲染 Normal Map =====
+        scene_normal = pyrender.Scene(bg_color=[*scene_bg_color, 0.0])
+        scene_normal.add(mesh, 'mesh')
+        camera_node = pyrender.Node(camera=camera, matrix=camera_pose)
+        scene_normal.add_node(camera_node)
+        
+        # 使用 FLAT 或 SKIP_CULL_FACES 标志来获取法线
+        flags = pyrender.RenderFlags.FLAT | pyrender.RenderFlags.RGBA
+        color_normal, depth = renderer.render(scene_normal, flags=flags)
+        
+        # 从深度图计算法线（更可靠的方法）
+        normal_map = self.depth_to_normal(depth, focal_length, camera_center)
+        
+        # ===== 2. 渲染 Depth/Disparity Map =====
+        scene_depth = pyrender.Scene(bg_color=[*scene_bg_color, 0.0])
+        scene_depth.add(mesh, 'mesh')
+        camera_node_depth = pyrender.Node(camera=camera, matrix=camera_pose)
+        scene_depth.add_node(camera_node_depth)
+        
+        _, depth_map = renderer.render(scene_depth)
+        
+        # 将深度转换为视差（disparity = 1/depth）
+        disparity_map = np.zeros_like(depth_map)
+        valid_depth = depth_map > 0
+        disparity_map[valid_depth] = 1.0 / depth_map[valid_depth]
+        
+        # ===== 3. 生成 Silhouette =====
+        silhouette = (depth_map > 0).astype(np.float32)
+        
+        renderer.delete()
+        
+        return normal_map, disparity_map, silhouette
+
+
+    def depth_to_normal(self, depth, focal_length, camera_center):
+        """
+        从深度图计算法线图
+        
+        Args:
+            depth: (H, W) 深度图
+            focal_length: 焦距
+            camera_center: [cx, cy] 相机中心
+            
+        Returns:
+            normal_map: (H, W, 3) 法线图，范围 [0, 1]
+        """
+        H, W = depth.shape
+        
+        # 创建像素坐标网格
+        y, x = np.mgrid[0:H, 0:W]
+        
+        # 将像素坐标转换为相机空间的 3D 点
+        z = depth
+        x_cam = (x - camera_center[0]) * z / focal_length
+        y_cam = (y - camera_center[1]) * z / focal_length
+        
+        # 计算梯度
+        dz_dx = np.zeros_like(depth)
+        dz_dy = np.zeros_like(depth)
+        
+        # 使用中心差分
+        dz_dx[:, 1:-1] = (z[:, 2:] - z[:, :-2]) / 2.0
+        dz_dy[1:-1, :] = (z[2:, :] - z[:-2, :]) / 2.0
+        
+        # 计算法线向量 (梯度叉乘)
+        normal = np.zeros((H, W, 3))
+        normal[:, :, 0] = -dz_dx * focal_length / (W / 2.0)
+        normal[:, :, 1] = -dz_dy * focal_length / (H / 2.0)
+        normal[:, :, 2] = 1.0
+        
+        # 归一化
+        norm = np.linalg.norm(normal, axis=2, keepdims=True)
+        norm[norm == 0] = 1.0  # 避免除零
+        normal = normal / norm
+        
+        # 将法线从 [-1, 1] 转换到 [0, 1] 用于可视化
+        normal_map = (normal + 1.0) / 2.0
+        
+        # 背景设为黑色
+        mask = depth > 0
+        normal_map[~mask] = 0
+        
+        return normal_map
 
 @dataclass
 class UniInvEulerSchedulerOutput(BaseOutput):

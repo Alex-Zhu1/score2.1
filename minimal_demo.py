@@ -11,6 +11,20 @@ from PIL import Image
 from hy3dshape.rembg import BackgroundRemover
 from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
 
+# -------------------- Reproducibility --------------------
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed)
+
+# ---- 确保确定性 ----
+# torch.use_deterministic_algorithms(True)  # 强制使用确定性算法
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
+# -------------------- Output Directory --------------------
+
 # -------------------- Settings --------------------
 model_path = 'tencent/Hunyuan3D-2.1'
 print(f"[INFO] Loading model from {model_path} ...")
@@ -37,19 +51,7 @@ mesh_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/
 moge_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1/pointcloud.ply"
 moge_hand_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_hand_depth/325_cropped_hoi_1/pointcloud.ply"
 
-# -------------------- Reproducibility --------------------
-seed = 42
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(seed)
 
-# ---- 确保确定性 ----
-# torch.use_deterministic_algorithms(True)  # 强制使用确定性算法
-# torch.backends.cudnn.deterministic = True
-# torch.backends.cudnn.benchmark = False
-# -------------------- Output Directory --------------------
 date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 unique_id = str(uuid.uuid4())[:8]
 actual_output_dir = os.path.join("infer_output", f"{date_str}_{unique_id}")
@@ -89,7 +91,7 @@ mesh = pipeline_shapegen(
     mesh_path=mesh_path,
     moge_path=moge_path,
     moge_hand_path=moge_hand_path,
-    do_inversion_stage=True
+    do_inversion_stage=False
 )
 
 # -------------------- Save Mesh Results --------------------

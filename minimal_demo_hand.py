@@ -11,32 +11,6 @@ from PIL import Image
 from hy3dshape.rembg import BackgroundRemover
 from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
 
-# -------------------- Settings --------------------
-model_path = 'tencent/Hunyuan3D-2.1'
-print(f"[INFO] Loading model from {model_path} ...")
-pipeline_shapegen = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(model_path)
-
-check_box_rembg = True  # 是否强制去背景
-
-# -------------------- Input Paths --------------------
-
-# 大概率是错误的图片，可以进行inversion
-
-ref_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png'
-# image_path = '/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/examples/325_cropped_hoi_1.png'  # 奇怪了，为啥这个要搭配那个不行rgba hand才行。我感觉这个dino encode有问题。需要金一步测试
-image_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png'
-# hand_image_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1h.png'
-# hand_image_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/output_meshes_之前/2025-10-22_14-23-51_670487/rembg_1.png"  # hand必须是这个不行的rgba
-hand_image_path = '/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/input_img/rembg_1.png'  # 这个hand是补全的
-object_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1o.png'
-
-
-# for registration and inversion
-mesh_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj"
-# mesh_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/hand_shape/325_cropped_hoi_1_0_watertight.obj"
-moge_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1/pointcloud.ply"
-moge_hand_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_hand_depth/325_cropped_hoi_1/pointcloud.ply"
-
 # -------------------- Reproducibility --------------------
 seed = 42
 random.seed(seed)
@@ -49,6 +23,34 @@ if torch.cuda.is_available():
 # torch.use_deterministic_algorithms(True)  # 强制使用确定性算法
 # torch.backends.cudnn.deterministic = True
 # torch.backends.cudnn.benchmark = False
+
+# -------------------- Settings --------------------
+model_path = 'tencent/Hunyuan3D-2.1'
+print(f"[INFO] Loading model from {model_path} ...")
+pipeline_shapegen = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(model_path)
+
+check_box_rembg = True  # 是否强制去背景
+
+# -------------------- Input Paths --------------------
+
+# 大概率是错误的图片，可以进行inversion
+
+ref_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png'
+image_path = '/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/examples/325_cropped_hoi_1.png'  # 奇怪了，为啥这个要搭配那个不行rgba hand才行。我感觉这个dino encode有问题。需要金一步测试
+# image_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png'
+# hand_image_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1h.png'
+hand_image_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/output_meshes_之前/2025-10-22_14-23-51_670487/rembg_1.png"  # hand必须是这个不行的rgba
+# hand_image_path = '/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/input_img/rembg_1.png'  # 这个hand是补全的,不好用
+object_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1o.png'
+
+
+# for registration and inversion
+mesh_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj"
+# mesh_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/hand_shape/325_cropped_hoi_1_0_watertight.obj"
+moge_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1/pointcloud.ply"
+moge_hand_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_hand_depth/325_cropped_hoi_1/pointcloud.ply"
+
+
 # -------------------- Output Directory --------------------
 date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 unique_id = str(uuid.uuid4())[:8]
