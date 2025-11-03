@@ -866,6 +866,17 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         #     [v['main'][i:i+1, ...] for i in range(2) for v in [cond_hoi, cond_hand, cond_object] if v is not None],
         #     dim=0
         # )
+        features_to_concat = []
+        for i in range(2):
+            if cond_hoi is not None:
+                features_to_concat.append(cond_hoi['main'][i:i+1, ...])
+            if cond_hand is not None:
+                features_to_concat.append(cond_hand['main'][i:i+1, ...])
+            if cond_object is not None:
+                features_to_concat.append(cond_object['main'][i:i+1, ...])
+
+        cond['main'] = torch.cat(features_to_concat, dim=0)
+
 
         batch_size = 1
 
@@ -891,7 +902,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         if do_inversion_stage:
             # 🔧 创建独立的 Phase 1 scheduler（避免污染）
             phase1_scheduler = copy.deepcopy(self.scheduler)
-            timesteps_phase1 = timesteps.clone()  # 使用相同的 timesteps
+            timesteps_phase1 = timesteps.clone()
             
             with synchronize_timer('Phase 1: Partial Sampling + Inversion'):
                 pbar = tqdm(timesteps_phase1, disable=not enable_pbar, desc="(Phase 1) Partial Sampling + Inversion:")
@@ -977,7 +988,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                         torch.cuda.synchronize()
                         break
 
-        # 🔧 重置 scheduler 状态（关键！）
+        # 🔧 重置 scheduler 状态, 避免影响
         self.scheduler._step_index = None
         # if hasattr(self.scheduler, 'timesteps'):
         #     self.scheduler.timesteps = None
@@ -985,17 +996,11 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         # ---------- 第二次 sampling ----------
         double_branch = False
         if double_branch:
-            # latents = torch.cat([latents] * 2, dim=0)
-            # cond = {
-            #     'main': torch.cat([cond_hoi['main'], cond_hand['main']], dim=0)
-            # }
-
             latents = torch.cat([latents] * 3, dim=0)
             cond = cond
         else:
             # cond = cond_hand
             cond = cond_hoi
-            # cond['main'] = torch.cat([cond['main'][[-1], ...], cond['main'][:-1]], dim=0)  # only keep object cond
         
         # ========== Phase 2: Full Sampling ==========
         with synchronize_timer('Phase 2: Full Sampling'):
@@ -1086,7 +1091,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         cond_hand = copy.deepcopy(cond)
 
         if do_classifier_free_guidance:
-            cond_hand = cond   # cond, uncond   # 文本好用
+            cond_hand = cond   # cond, uncond
             # cond_hand['main'] = torch.cat([cond['main'][[-1], :, :], cond['main'][[-1], :, :]], dim=0)     # uncond, uncond
         else:
             cond_hand = [cond['main'][[-1], :, :]]  # uncond only
@@ -1195,17 +1200,9 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                 timesteps=timesteps,
                 generator=generator,
             )
-            # latents = 1. / 1.15 * latents
 
             if latents.shape[0] == 1:
                 latents = latents
-            # else:
-            #     if latents.shape[0] != batch_size:
-            #         if latents.shape[0] == 1:
-            #             latentss = latents.expand(batch_size, *latents.shape[1:])
-            #         else:
-            #             # Repeat if batch size is incompatible
-            #             latentss = latents.repeat((batch_size // latents.shape[0] + 1), 1, 1)[:batch_size]
         else:
             if enable_pbar:
                 print("[inversion] Skipping inversion; generating random latents.")
@@ -1243,11 +1240,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             cond_inputs (dict): 包含 'image' 和 'mask' 的 tensor
             save_dir (str): 保存图片的目录
         """
-        
-        # import os
-        # import torch
-        # import numpy as np
-        # from PIL import Image
+
         os.makedirs(save_dir, exist_ok=True)
 
         def tensor_to_numpy(tensor):
