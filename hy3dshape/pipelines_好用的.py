@@ -819,6 +819,8 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         do_inversion_stage: bool = False,
         **kwargs,
     ) -> List[List[trimesh.Trimesh]]:
+        callback = kwargs.pop("callback", None)
+        callback_steps = kwargs.pop("callback_steps", None)
 
         self.set_surface_extractor(mc_algo)
 
@@ -861,11 +863,11 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         cond_hand = cond_features.get('hand', None)
         cond_object = cond_features.get('object', None)
 
-        # cond = copy.deepcopy(cond_ref)
-        # cond['main'] = torch.cat(
-        #     [v['main'][i:i+1, ...] for i in range(2) for v in [cond_hoi, cond_hand, cond_object] if v is not None],
-        #     dim=0
-        # )
+        cond = copy.deepcopy(cond_ref)
+        cond['main'] = torch.cat(
+            [v['main'][i:i+1, ...] for i in range(2) for v in [cond_hoi, cond_hand, cond_object] if v is not None],
+            dim=0
+        )
 
         batch_size = 1
 
@@ -1198,7 +1200,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             # latents = 1. / 1.15 * latents
 
             if latents.shape[0] == 1:
-                latents = latents
+                latentss = latents
             # else:
             #     if latents.shape[0] != batch_size:
             #         if latents.shape[0] == 1:
@@ -1209,9 +1211,9 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         else:
             if enable_pbar:
                 print("[inversion] Skipping inversion; generating random latents.")
-            latents = self.prepare_latents(batch_size, self.dtype, device, generator)
+            latentss = self.prepare_latents(batch_size, self.dtype, device, generator)
         
-        return latents
+        return latentss
     
     def registration(self, hunyuan_mesh, hamer_mesh, moge_pointmap, moge_hand_pointmap):
 

@@ -40,4 +40,6 @@ hand_image_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi
 hand_image_path1 = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/output_meshes_之前/2025-10-22_14-23-51_670487/rembg_1.png"  # hand必须是这个不行的rgba
 analyze_image(hand_image_path)
 analyze_image(hand_image_path1)
-analyze_image("/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/input_img/rembg_1.png")
+print("-------score2.1 infer output ---------")
+analyze_image('/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1h.png')
+analyze_image("/mnt/data/users/haiming.zhu/HOI2/score2.1/score2.1/infer_output/2025-10-29_10-50-08_92a92908/325_cropped_hoi_1h.png")
