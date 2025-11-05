@@ -139,7 +139,7 @@ def generate_dense_grid_points(
 
 
 class VanillaVolumeDecoder:
-    @torch.no_grad()
+    # @torch.no_grad()
     def __call__(
         self,
         latents: torch.FloatTensor,

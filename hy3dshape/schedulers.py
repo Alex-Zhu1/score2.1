@@ -25,16 +25,22 @@
 # optimizer states), machine-learning model code, inference-enabling code, training-enabling code,
 # fine-tuning enabling code and other elements of the foregoing made publicly available
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
-
+import os
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from diffusers.utils import BaseOutput, logging
+
+import imageio.v3 as iio
+import trimesh
+import cv2 as cv
+import nvdiffrast.torch as dr
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -253,78 +259,485 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         s_noise: float = 1.0,
         generator: Optional[torch.Generator] = None,
         return_dict: bool = True,
-    ) -> Union[FlowMatchEulerDiscreteSchedulerOutput, Tuple]:
+        enable_guidance_2d: bool = False,
+        To: Optional[torch.Tensor] = None,
+        _export: Optional[Callable] = None,
+        mesh_ref: Optional[trimesh.Trimesh] = None,
+        guidance_config: Optional[dict] = None,
+    ) -> Union["FlowMatchEulerDiscreteSchedulerOutput", Tuple]:
         """
-        Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
-        process from the learned model outputs (most often the predicted noise).
-
+        Predict the sample from the previous timestep by reversing the SDE.
+        
         Args:
-            model_output (`torch.FloatTensor`):
-                The direct output from learned diffusion model.
-            timestep (`float`):
-                The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
-                A current instance of a sample created by the diffusion process.
-            s_churn (`float`):
-            s_tmin  (`float`):
-            s_tmax  (`float`):
-            s_noise (`float`, defaults to 1.0):
-                Scaling factor for noise added to the sample.
-            generator (`torch.Generator`, *optional*):
-                A random number generator.
-            return_dict (`bool`):
-                Whether or not to return a [`~schedulers.scheduling_euler_discrete.EulerDiscreteSchedulerOutput`] or
-                tuple.
-
+            model_output: Direct output from learned diffusion model
+            timestep: Current discrete timestep in the diffusion chain
+            sample: Current instance of a sample created by the diffusion process
+            To: Global transformation matrix (4x4)
+            _export: Function to convert latent/depth to mesh
+            reference_mesh_path: Path to reference mesh for 2D guidance (optional)
+            enable_guidance_2d: Whether to enable 2D guidance optimization
+            guidance_config: Dictionary with guidance parameters (lr, num_steps, weights)
+            Other args: Standard scheduler parameters
+        
         Returns:
-            [`~schedulers.scheduling_euler_discrete.EulerDiscreteSchedulerOutput`] or `tuple`:
-                If return_dict is `True`, [`~schedulers.scheduling_euler_discrete.EulerDiscreteSchedulerOutput`] is
-                returned, otherwise a tuple is returned where the first element is the sample tensor.
+            FlowMatchEulerDiscreteSchedulerOutput or tuple with prev_sample
         """
-
-        if (
-            isinstance(timestep, int)
-            or isinstance(timestep, torch.IntTensor)
-            or isinstance(timestep, torch.LongTensor)
-        ):
+        
+        # Validate timestep format
+        if isinstance(timestep, (int, torch.IntTensor, torch.LongTensor)):
             raise ValueError(
-                (
-                    "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
-                    " `EulerDiscreteScheduler.step()` is not supported. Make sure to pass"
-                    " one of the `scheduler.timesteps` as a timestep."
-                ),
+                "Passing integer indices as timesteps to EulerDiscreteScheduler.step() "
+                "is not supported. Pass one of scheduler.timesteps instead."
             )
 
         if self.step_index is None:
             self._init_step_index(timestep)
 
-        # Upcast to avoid precision issues when computing prev_sample
+        # Get device and dtype info
+        device = sample.device
+        original_dtype = model_output.dtype
+        
+        # Upcast to avoid precision issues
         sample = sample.to(torch.float32)
 
+        # Get current and next sigma values
         sigma = self.sigmas[self.step_index]
         sigma_next = self.sigmas[self.step_index + 1]
 
+        # Apply 2D guidance if enabled
+        if enable_guidance_2d and mesh_ref is not None:
+            model_output = self._apply_2d_guidance(
+                model_output=model_output,
+                sample=sample,
+                sigma=sigma,
+                To=To,
+                _export=_export,
+                mesh_ref=mesh_ref,
+                device=device,
+                original_dtype=original_dtype,
+                config=guidance_config or {}
+            )
+        
+        # Standard Euler update step
         prev_sample = sample + (sigma_next - sigma) * model_output
+        prev_sample = prev_sample.to(original_dtype)
 
-        # Cast sample back to model compatible dtype
-        prev_sample = prev_sample.to(model_output.dtype)
-
-        # predict the original sample (x_0) from the model's output
+        # Predict original sample (x_0)
         pred_original_sample = sample + (1.0 - sigma) * model_output
-        pred_original_sample = pred_original_sample.to(model_output.dtype)
+        pred_original_sample = pred_original_sample.to(original_dtype)
 
-        # upon completion increase step index by one
+        # Increment step index
         self._step_index += 1
 
         if not return_dict:
             return (prev_sample,)
 
-        return ConsistencyFlowMatchEulerDiscreteSchedulerOutput(prev_sample=prev_sample,
-                                                     pred_original_sample=pred_original_sample)
+        return ConsistencyFlowMatchEulerDiscreteSchedulerOutput(
+            prev_sample=prev_sample,
+            pred_original_sample=pred_original_sample
+        )
+
+    @torch.enable_grad()
+    def _apply_2d_guidance(
+        self,
+        model_output: torch.FloatTensor,
+        sample: torch.FloatTensor,
+        sigma: float,
+        To: torch.Tensor,
+        _export: Callable,
+        mesh_ref: trimesh.Trimesh,
+        device: torch.device,
+        original_dtype: torch.dtype,
+        config: dict,
+    ) -> torch.FloatTensor:
+        """
+        Apply 2D guidance optimization to refine model output.
+        
+        Args:
+            model_output: Current velocity prediction
+            sample: Current sample x_t
+            sigma: Current noise level
+            To: Global transformation matrix
+            _export: Function to export latent to mesh
+            reference_mesh_path: Path to reference mesh
+            device: Torch device
+            config: Configuration dict with lr, num_steps, loss_weights, etc.
+        
+        Returns:
+            Optimized velocity prediction
+        """
+        
+        # Extract config with defaults
+        num_steps = config.get('num_steps', 50)
+        lr_scale = config.get('lr_scale', 0.01)
+        lr_translation = config.get('lr_translation', 0.01)
+        lr_rotation = config.get('lr_rotation', 0.5)
+        lr_velocity = config.get('lr_velocity', 0.0001)
+        
+        weight_norm = config.get('weight_norm', 10.0)
+        weight_disp = config.get('weight_disp', 10.0)
+        weight_sil = config.get('weight_sil', 10.0)
+        weight_reg = config.get('weight_reg', 0.001)
+        
+        fov_x = config.get('fov_x', 41.039776)
+        fov_y = config.get('fov_y', 41.039776)
+        
+        # Initialize optimizable parameters
+        para_velocity = model_output.clone().detach().requires_grad_(True)
+        
+        scale = torch.ones(3, device=device, dtype=torch.float32, requires_grad=True)
+        rotation = torch.eye(3, device=device, dtype=torch.float32, requires_grad=True)
+        translation = torch.zeros(3, device=device, dtype=torch.float32, requires_grad=True)
+        
+        # Setup optimizer
+        optimizer = torch.optim.Adam([
+            {'params': [scale], 'lr': lr_scale},
+            {'params': [translation], 'lr': lr_translation},
+            {'params': [rotation], 'lr': lr_rotation},
+            {'params': [para_velocity], 'lr': lr_velocity},
+        ])
+        
+        # Load and render reference mesh once (outside loop)
+        try:
+            # mesh_ref = mesh_ref
+            # ref_normal, ref_disparity, ref_silhouette = self.render_maps(
+            #     mesh_ref, fov_x=fov_x, fov_y=fov_y
+            # )
+            # # Move to correct device
+            # ref_normal = self.to_device(ref_normal, device)
+            # ref_disparity = self.to_device(ref_disparity, device)
+            # ref_silhouette = self.to_device(ref_silhouette, device)
+
+            # 上面是读取参考网格并渲染得到参考图
+            # 下面直接利用处理数据时候的img
+            base_dir = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1"
+
+            # 1. 读取法线图（normal_map，RGB）
+            ref_normal = cv.imread(f"{base_dir}/rendered_normal.png", cv.IMREAD_COLOR)
+            ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB) / 255.0  # 转 RGB 并归一化
+            ref_normal = self.to_device(ref_normal, device)  # shape: (H, W, 3)
+
+            # 2. 读取视差图（disparity_map，EXR 浮点）
+            # ref_disparity = cv.imread(f"{base_dir}/rendered_disparity.exr", cv.IMREAD_UNCHANGED)
+            # if ref_disparity is None:
+            #     raise FileNotFoundError(f"Cannot read EXR file: {base_dir}/rendered_disparity.exr")
+            # ref_disparity = self.to_device(ref_disparity.astype(np.float32), device)  # shape: (H, W)
+            ref_disparity = iio.imread(f"{base_dir}/rendered_disparity.exr").astype(np.float32)
+            ref_disparity = self.to_device(ref_disparity, device)  # shape: (H, W)
+
+
+            # 3. 读取掩码（silhouette，灰度）
+            ref_silhouette = cv.imread(f"{base_dir}/rendered_silhouette.png", cv.IMREAD_GRAYSCALE)
+            ref_silhouette = (ref_silhouette / 255.0).astype(np.float32)
+            ref_silhouette = self.to_device(ref_silhouette, device)  # shape: (H, W)
+
+            # 
+            self.glctx = dr.RasterizeGLContext()
+        except Exception as e:
+            print(f"Warning: Could not load reference mesh: {e}")
+            return model_output  # Fall back to original output
+        
+        # Optimization loop
+        for opt_step in range(num_steps):
+            optimizer.zero_grad()
+            
+            # Build transformation matrix
+            transform = self._build_transform_matrix(scale, rotation, translation, device)
+            
+            # Predict x_1 using current velocity
+            x1 = sample + (1.0 - sigma) * para_velocity
+            
+            # Export to mesh and apply transforms
+            x1 = x1.to(original_dtype)
+            mesh_x1 = _export(x1, output_type='mesh')   # vae的dtype 和 x1不一样
+            mesh_x1.apply_transform(transform.detach().cpu().numpy())
+            mesh_x1.apply_transform(To)
+            
+            # Render current mesh
+            normal_map, disparity_map, silhouette = self.render_maps(
+                mesh_x1, fov_x=fov_x, fov_y=fov_y
+            )
+            # 可视化下normal_map, disparity_map, silhouette
+            cv.imwrite(f"./debug/opt_step_{opt_step:03d}_normal.png", (normal_map.cpu().numpy() * 255).astype(np.uint8))
+            cv.imwrite(f"./debug/opt_step_{opt_step:03d}_disparity.exr", disparity_map.cpu().numpy().astype(np.float32))
+            cv.imwrite(f"./debug/opt_step_{opt_step:03d}_silhouette.png", (silhouette.cpu().numpy() * 255).astype(np.uint8))
+            
+            # Move to device
+            normal_map = self.to_device(normal_map, device)
+            disparity_map = self.to_device(disparity_map, device)
+            silhouette = self.to_device(silhouette, device)
+            
+            # Compute losses
+            loss_norm = F.l1_loss(normal_map, ref_normal)
+            loss_disp = F.l1_loss(disparity_map, ref_disparity)
+            loss_sil = F.binary_cross_entropy_with_logits(silhouette, ref_silhouette)
+            
+            # Regularization losses
+            loss_translation = torch.norm(translation)
+            loss_scale = torch.abs(torch.det(transform[:3, :3]) - 1.0)
+            loss_reg = loss_translation + loss_scale
+            
+            # Total loss
+            total_loss = (
+                weight_norm * loss_norm +
+                weight_disp * loss_disp +
+                weight_sil * loss_sil +
+                weight_reg * loss_reg
+            )
+            
+            # Backward and optimize
+            total_loss.backward()
+            optimizer.step()
+            
+            # Logging
+            if opt_step % 10 == 0:
+                print(
+                    f"[Step {opt_step}] "
+                    f"L_norm={loss_norm.item():.4f}, "
+                    f"L_disp={loss_disp.item():.4f}, "
+                    f"L_sil={loss_sil.item():.4f}, "
+                    f"L_reg={loss_reg.item():.6f}, "
+                    f"Total={total_loss.item():.4f}"
+                )
+        
+        # Return optimized velocity
+        return para_velocity.detach()
+    
+    def to_device(self, x, device=None, dtype=torch.float32):
+        """
+        将输入数据转换为 torch.Tensor，并移动到指定设备和数据类型。
+        支持 torch.Tensor 或 numpy.ndarray。
+        """
+        if isinstance(x, torch.Tensor):
+            return x.to(device=device, dtype=dtype)
+        elif isinstance(x, np.ndarray):
+            return torch.as_tensor(x, dtype=dtype, device=device)
+        else:
+            raise TypeError(f"Unsupported type {type(x)}")
+
+
+    def _build_transform_matrix(
+        self,
+        scale: torch.Tensor,
+        rotation: torch.Tensor,
+        translation: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Build 4x4 transformation matrix from scale, rotation, and translation.
+        
+        Args:
+            scale: (3,) scaling factors [sx, sy, sz]
+            rotation: (3, 3) rotation matrix
+            translation: (3,) translation vector [tx, ty, tz]
+            device: Target device
+        
+        Returns:
+            (4, 4) transformation matrix
+        """
+        transform = torch.eye(4, device=device, dtype=torch.float32)
+        
+        # Apply scale to rotation matrix
+        SR = torch.diag(scale) @ rotation
+        
+        # Fill in transformation matrix
+        transform[:3, :3] = SR
+        transform[:3, 3] = translation
+        
+        return transform
+
 
     def __len__(self):
         return self.config.num_train_timesteps
 
+
+
+    def render_maps(
+            self,
+            mesh,
+            fov_x: float,
+            fov_y: float,
+            render_res: tuple[int, int] = (224, 224),
+            scene_bg_color: tuple[int, int, int] = (0, 0, 0),
+            device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        ):
+        """
+        使用 FOV 渲染法线图、视差图和轮廓图。
+        
+        Args:
+            mesh: pyrender.Mesh 对象或包含 vertices, faces 属性的对象
+            fov_x, fov_y: 水平和垂直视场角（单位：度）
+            render_res: (width, height)
+            scene_bg_color: 背景颜色
+        
+        Returns:
+            normal_map: (H, W, 3) 世界空间法线图，范围 [0, 1]
+            disparity_map: (H, W) 视差图 (1/depth)
+            silhouette: (H, W) 二值轮廓图
+        """
+        # 提取顶点和面
+        if hasattr(mesh, 'primitives'):  # pyrender.Mesh
+            verts = torch.tensor(mesh.primitives[0].positions, device=device, dtype=torch.float32)
+            faces = torch.tensor(mesh.primitives[0].indices, device=device, dtype=torch.int32)
+        else:  # 直接访问属性
+            verts = torch.tensor(mesh.vertices, device=device, dtype=torch.float32)
+            faces = torch.tensor(mesh.faces, device=device, dtype=torch.int32)
+        
+        verts = verts.unsqueeze(0)  # (1, V, 3)
+        faces = faces.unsqueeze(0)  # (1, F, 3)
+
+        W, H = render_res
+
+        # === 1. 由 FOV 计算焦距 ===
+        fx = W / (2 * np.tan(np.deg2rad(fov_x) / 2))
+        fy = H / (2 * np.tan(np.deg2rad(fov_y) / 2))
+        cx, cy = W / 2, H / 2
+
+        # === 2. 初始化投影矩阵与相机 ===
+        projection = torch.tensor([
+            [fx, 0, cx, 0],
+            [0, fy, cy, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ], device=device, dtype=torch.float32)
+
+        c2ws = torch.eye(4, device=device, dtype=torch.float32)
+
+        # === 3. 计算顶点法线 ===
+        normals = self.compute_vertex_normals(verts[0], faces[0])  # (V, 3)
+        normals = normals.unsqueeze(0)  # (1, V, 3)
+
+        # === 4. 渲染法线图 ===
+        # 将法线从 [-1, 1] 映射到 [0, 1] 用于渲染
+        normal_colors = (normals + 1.0) / 2.0
+        normal_map, alpha_map = self.renderer(
+            verts, faces, normal_colors[0], projection, c2ws, (H, W)
+        )
+
+        # === 5. 渲染深度图 ===
+        depth_map = self.render_depth(verts, faces, projection, c2ws, (H, W))
+
+        # === 6. 计算视差图 ===
+        # 视差 = 1 / depth，避免除零
+        epsilon = 1e-6
+        disparity_map = 1.0 / (depth_map + epsilon)
+        # 背景设为0
+        disparity_map = disparity_map * alpha_map
+
+        # === 7. 提取轮廓 ===
+        silhouette = (alpha_map > 0.5).float()
+
+        return normal_map, disparity_map, silhouette
+
+
+    def renderer(self, verts, tri, color, projection, c2ws, resolution):
+        """
+        基础渲染器，返回颜色图和 alpha 通道
+        
+        Returns:
+            img: (H, W, 3) RGB 图像
+            alpha: (H, W) alpha 通道
+        """
+        device = projection.device
+        
+        # 齐次坐标
+        ones = torch.ones(1, verts.shape[1], 1, device=device, dtype=torch.float32)
+        pos = torch.cat((verts, ones), dim=2)  # (1, V, 4)
+        
+        # 计算 MVP 矩阵
+        try:
+            view_matrix = torch.inverse(c2ws)
+        except:
+            view_matrix = torch.linalg.pinv(c2ws)
+        
+        mat = (projection @ view_matrix).unsqueeze(0)  # (1, 4, 4)
+        pos_clip = pos @ mat.mT  # (1, V, 4)
+        
+        # 光栅化
+        rast, _ = dr.rasterize(self.glctx, pos_clip, tri, resolution)
+        
+        # 插值颜色
+        color = color.unsqueeze(0) if color.dim() == 2 else color
+        out, _ = dr.interpolate(color, rast, tri)
+        out = dr.antialias(out, rast, pos_clip, tri)
+        
+        # 提取 RGB 和 alpha
+        img = torch.flip(out[0, :, :, :3], dims=[0])  # (H, W, 3)
+        alpha = torch.flip(out[0, :, :, 3], dims=[0])  # (H, W)
+        
+        return img, alpha
+
+
+    def render_depth(self, verts, tri, projection, c2ws, resolution):
+        """
+        渲染深度图
+        
+        Returns:
+            depth: (H, W) 深度值
+        """
+        device = projection.device
+        
+        # 齐次坐标
+        ones = torch.ones(1, verts.shape[1], 1, device=device, dtype=torch.float32)
+        pos = torch.cat((verts, ones), dim=2)  # (1, V, 4)
+        
+        # MVP 变换
+        try:
+            view_matrix = torch.inverse(c2ws)
+        except:
+            view_matrix = torch.linalg.pinv(c2ws)
+        
+        mat = (projection @ view_matrix).unsqueeze(0)
+        pos_clip = pos @ mat.mT
+        
+        # 光栅化
+        rast, _ = dr.rasterize(self.glctx, pos_clip, tri, resolution)
+        
+        # 计算相机空间深度（Z 值）
+        pos_camera = (pos @ view_matrix.unsqueeze(0).mT)[:, :, 2:3]  # (1, V, 1)
+        
+        # 插值深度
+        depth, _ = dr.interpolate(pos_camera, rast, tri)
+        depth = torch.flip(depth[0, :, :, 0], dims=[0])  # (H, W)
+        
+        # 取绝对值（深度为正）
+        depth = torch.abs(depth)
+        
+        return depth
+
+
+    def compute_vertex_normals(self, verts, faces):
+        """
+        计算顶点法线
+        
+        Args:
+            verts: (V, 3) 顶点坐标
+            faces: (F, 3) 面索引
+        
+        Returns:
+            normals: (V, 3) 单位法线向量
+        """
+        # 获取三角形的三个顶点
+        v0 = verts[faces[:, 0]]  # (F, 3)
+        v1 = verts[faces[:, 1]]
+        v2 = verts[faces[:, 2]]
+        
+        # 计算面法线
+        face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)  # (F, 3)
+        
+        # 归一化
+        face_normals = torch.nn.functional.normalize(face_normals, dim=1)
+        
+        # 累加到顶点
+        vertex_normals = torch.zeros_like(verts)
+        vertex_normals.index_add_(0, faces[:, 0], face_normals)
+        vertex_normals.index_add_(0, faces[:, 1], face_normals)
+        vertex_normals.index_add_(0, faces[:, 2], face_normals)
+        
+        # 归一化
+        vertex_normals = torch.nn.functional.normalize(vertex_normals, dim=1)
+        
+        return vertex_normals
 
 @dataclass
 class UniInvEulerSchedulerOutput(BaseOutput):
