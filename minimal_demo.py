@@ -48,7 +48,8 @@ object_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1o.
 # for registration and inversion
 mesh_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj"
 # mesh_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/hand_shape/325_cropped_hoi_1_0_watertight.obj"
-moge_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1/pointcloud.ply"
+# moge_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1/pointcloud.ply"
+moge_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1/mesh.glb"
 moge_hand_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_hand_depth/325_cropped_hoi_1/pointcloud.ply"
 
 
@@ -91,7 +92,7 @@ mesh = pipeline_shapegen(
     mesh_path=mesh_path,
     moge_path=moge_path,
     moge_hand_path=moge_hand_path,
-    do_inversion_stage=False
+    do_inversion_stage=True
 )
 
 # -------------------- Save Mesh Results --------------------
