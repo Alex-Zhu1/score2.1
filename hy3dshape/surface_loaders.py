@@ -14,6 +14,7 @@
 
 
 
+import copy
 import numpy as np
 
 import torch
@@ -255,6 +256,8 @@ class SharpEdgeSurfaceLoader:
             mesh.apply_transform(Th)
             # MoGe -> Hunyuan3D (To 的逆)
             mesh.apply_transform(np.linalg.inv(To))
+
+            copy.deepcopy(mesh).export("Hamer_final_transform_to_Hunyuan3D.glb")
 
         surface, mesh = load_surface_sharpegde(mesh, num_points=num_uniform_points, num_sharp_points=num_sharp_points)
         return surface

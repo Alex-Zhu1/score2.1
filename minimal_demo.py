@@ -36,20 +36,20 @@ check_box_rembg = True  # 是否强制去背景
 
 # 大概率是错误的图片，可以进行inversion
 
-ref_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png'
-# image_path = '/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/examples/325_cropped_hoi_1.png'  # 奇怪了，为啥这个要搭配那个不行rgba hand才行。我感觉这个dino encode有问题。需要金一步测试
-image_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png'
-hand_image_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1h.png'
-# hand_image_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/output_meshes_之前/2025-10-22_14-23-51_670487/rembg_1.png"  # hand必须是这个不行的rgba
-# hand_image_path = '/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/input_img/rembg_1.png'  # 这个hand是补全的
-object_path = '/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1o.png'
+ref_path = '/home/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png'
+# image_path = '/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/examples/325_cropped_hoi_1.png'  # 奇怪了，为啥这个要搭配那个不行rgba hand才行。我感觉这个dino encode有问题。需要金一步测试
+image_path = '/home/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png'
+hand_image_path = '/home/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1h.png'
+# hand_image_path = "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/output_meshes_之前/2025-10-22_14-23-51_670487/rembg_1.png"  # hand必须是这个不行的rgba
+# hand_image_path = '/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/input_img/rembg_1.png'  # 这个hand是补全的
+object_path = '/home/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1o.png'
 
 
 # for registration and inversion
-mesh_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj"
-# mesh_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/hand_shape/325_cropped_hoi_1_0_watertight.obj"
-moge_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1/pointcloud.ply"
-moge_hand_path = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_hand_depth/325_cropped_hoi_1/pointcloud.ply"
+mesh_path = "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj"
+# mesh_path = "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/HOI_data/hand_shape/325_cropped_hoi_1_0_watertight.obj"
+moge_path = "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1/pointcloud.ply"
+moge_hand_path = "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_hand_depth/325_cropped_hoi_1/pointcloud.ply"
 
 
 date_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

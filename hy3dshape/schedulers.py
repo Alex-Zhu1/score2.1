@@ -304,19 +304,19 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         sigma = self.sigmas[self.step_index]
         sigma_next = self.sigmas[self.step_index + 1]
 
-        # Apply 2D guidance if enabled
-        if enable_guidance_2d and mesh_ref is not None:
-            model_output = self._apply_2d_guidance(
-                model_output=model_output,
-                sample=sample,
-                sigma=sigma,
-                To=To,
-                _export=_export,
-                mesh_ref=mesh_ref,
-                device=device,
-                original_dtype=original_dtype,
-                config=guidance_config or {}
-            )
+        # # Apply 2D guidance if enabled
+        # if enable_guidance_2d:
+        #     model_output = self._apply_2d_guidance(
+        #         model_output=model_output,
+        #         sample=sample,
+        #         sigma=sigma,
+        #         To=To,
+        #         _export=_export,
+        #         mesh_ref=mesh_ref,
+        #         device=device,
+        #         original_dtype=original_dtype,
+        #         config=guidance_config or {}
+        #     )
         
         # Standard Euler update step
         prev_sample = sample + (sigma_next - sigma) * model_output
@@ -410,7 +410,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
             # 上面是读取参考网格并渲染得到参考图
             # 下面直接利用处理数据时候的img
-            base_dir = "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1"
+            base_dir = "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1"
 
             # 1. 读取法线图（normal_map，RGB）
             ref_normal = cv.imread(f"{base_dir}/rendered_normal.png", cv.IMREAD_COLOR)
@@ -422,8 +422,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             # if ref_disparity is None:
             #     raise FileNotFoundError(f"Cannot read EXR file: {base_dir}/rendered_disparity.exr")
             # ref_disparity = self.to_device(ref_disparity.astype(np.float32), device)  # shape: (H, W)
-            ref_disparity = iio.imread(f"{base_dir}/rendered_disparity.exr").astype(np.float32)
-            ref_disparity = self.to_device(ref_disparity, device)  # shape: (H, W)
+            
+            # ref_disparity = iio.imread(f"{base_dir}/rendered_disparity.exr").astype(np.float32)
+            # ref_disparity = self.to_device(ref_disparity, device)  # shape: (H, W)
 
 
             # 3. 读取掩码（silhouette，灰度）
@@ -448,18 +449,46 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             x1 = sample + (1.0 - sigma) * para_velocity
             
             # Export to mesh and apply transforms
+            # x1 = x1.to(original_dtype)
+            # mesh_x1 = _export(x1, output_type='mesh')   # 这里返回的是，一个 点 和 面 的 list，所以下面不能用trimesh的apply_transform, 要对点进行变换
+            # mesh_x1.apply_transform(transform.detach().cpu().numpy())
+            # mesh_x1.apply_transform(To)
+            
+            # Export to mesh and apply transforms
             x1 = x1.to(original_dtype)
-            mesh_x1 = _export(x1, output_type='mesh')   # vae的dtype 和 x1不一样
-            mesh_x1.apply_transform(transform.detach().cpu().numpy())
-            mesh_x1.apply_transform(To)
+            mesh_i = _export(x1, output_type='mesh')[0]  # 返回 vertices 和 faces
+            vertices, faces = mesh_i.mesh_v, mesh_i.mesh_f
+
+
+            # 确保 vertices 是 torch tensor
+            if not isinstance(vertices, torch.Tensor):
+                vertices = torch.from_numpy(vertices).to(transform.device)
+
+            # 转换为齐次坐标 [N, 4]
+            vertices_homo = torch.cat([vertices, torch.ones(vertices.shape[0], 1, device=vertices.device)], dim=1)
+
+            # 应用第一个变换
+            vertices_homo = vertices_homo @ transform.T
+
+            # 应用第二个变换 (确保 To 也是 torch tensor)
+            if not isinstance(To, torch.Tensor):
+                To = torch.from_numpy(To).to(transform.device).to(vertices_homo.dtype)
+            vertices_homo = vertices_homo @ To.T
+
+            # 转换回3D坐标
+            vertices_transformed = vertices_homo[:, :3] / vertices_homo[:, 3:4]
+
+            # 如果需要返回 trimesh 对象用于可视化/保存（不参与梯度计算）
+            # mesh_x1 = trimesh.Trimesh(vertices=vertices_transformed.detach().cpu().numpy(), faces=faces)
+
             
             # Render current mesh
-            normal_map, disparity_map, silhouette = self.render_maps(
-                mesh_x1, fov_x=fov_x, fov_y=fov_y
+            normal_map, disparity_map, silhouette = self.render_maps(verts=vertices_transformed,
+                faces=faces, fov_x=fov_x, fov_y=fov_y
             )
             # 可视化下normal_map, disparity_map, silhouette
             cv.imwrite(f"./debug/opt_step_{opt_step:03d}_normal.png", (normal_map.cpu().numpy() * 255).astype(np.uint8))
-            cv.imwrite(f"./debug/opt_step_{opt_step:03d}_disparity.exr", disparity_map.cpu().numpy().astype(np.float32))
+            # cv.imwrite(f"./debug/opt_step_{opt_step:03d}_disparity.exr", disparity_map.cpu().numpy().astype(np.float32))
             cv.imwrite(f"./debug/opt_step_{opt_step:03d}_silhouette.png", (silhouette.cpu().numpy() * 255).astype(np.uint8))
             
             # Move to device
@@ -469,7 +498,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             
             # Compute losses
             loss_norm = F.l1_loss(normal_map, ref_normal)
-            loss_disp = F.l1_loss(disparity_map, ref_disparity)
+            # loss_disp = F.l1_loss(disparity_map, ref_disparity)
             loss_sil = F.binary_cross_entropy_with_logits(silhouette, ref_silhouette)
             
             # Regularization losses
@@ -480,7 +509,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             # Total loss
             total_loss = (
                 weight_norm * loss_norm +
-                weight_disp * loss_disp +
                 weight_sil * loss_sil +
                 weight_reg * loss_reg
             )
@@ -494,7 +522,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                 print(
                     f"[Step {opt_step}] "
                     f"L_norm={loss_norm.item():.4f}, "
-                    f"L_disp={loss_disp.item():.4f}, "
                     f"L_sil={loss_sil.item():.4f}, "
                     f"L_reg={loss_reg.item():.6f}, "
                     f"Total={total_loss.item():.4f}"
@@ -554,7 +581,8 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
     def render_maps(
             self,
-            mesh,
+            verts,
+            faces,
             fov_x: float,
             fov_y: float,
             render_res: tuple[int, int] = (224, 224),
@@ -576,12 +604,8 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             silhouette: (H, W) 二值轮廓图
         """
         # 提取顶点和面
-        if hasattr(mesh, 'primitives'):  # pyrender.Mesh
-            verts = torch.tensor(mesh.primitives[0].positions, device=device, dtype=torch.float32)
-            faces = torch.tensor(mesh.primitives[0].indices, device=device, dtype=torch.int32)
-        else:  # 直接访问属性
-            verts = torch.tensor(mesh.vertices, device=device, dtype=torch.float32)
-            faces = torch.tensor(mesh.faces, device=device, dtype=torch.int32)
+        verts = torch.tensor(verts, device=device, dtype=torch.float32)
+        faces = torch.tensor(faces, device=device, dtype=torch.int32)
         
         verts = verts.unsqueeze(0)  # (1, V, 3)
         faces = faces.unsqueeze(0)  # (1, F, 3)
@@ -609,9 +633,15 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
         # === 4. 渲染法线图 ===
         # 将法线从 [-1, 1] 映射到 [0, 1] 用于渲染
-        normal_colors = (normals + 1.0) / 2.0
+        normal_colors = (normals + 1.0) / 2.0  # (1, V, 3)
+        
+        # 添加 alpha 通道（所有顶点的 alpha 设为 1.0）
+        alpha_channel = torch.ones(1, normal_colors.shape[1], 1, device=device, dtype=torch.float32)
+        normal_colors_rgba = torch.cat([normal_colors, alpha_channel], dim=2)  # (1, V, 4)
+        
+        # 注意：这里传入的是 (V, 4) 而不是 (1, V, 4)
         normal_map, alpha_map = self.renderer(
-            verts, faces, normal_colors[0], projection, c2ws, (H, W)
+            verts, faces, normal_colors_rgba[0], projection, c2ws, (H, W)
         )
 
         # === 5. 渲染深度图 ===
@@ -632,14 +662,11 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
     def renderer(self, verts, tri, color, projection, c2ws, resolution):
         """
-        基础渲染器，返回颜色图和 alpha 通道
-        
-        Returns:
-            img: (H, W, 3) RGB 图像
-            alpha: (H, W) alpha 通道
         """
         device = projection.device
-        
+        # 光栅化前
+        if tri.dim() == 3 and tri.shape[0] == 1:
+            tri = tri.squeeze(0)
         # 齐次坐标
         ones = torch.ones(1, verts.shape[1], 1, device=device, dtype=torch.float32)
         pos = torch.cat((verts, ones), dim=2)  # (1, V, 4)
@@ -671,39 +698,53 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
     def render_depth(self, verts, tri, projection, c2ws, resolution):
         """
         渲染深度图
-        
+
         Returns:
             depth: (H, W) 深度值
         """
         device = projection.device
-        
+
+        # 光栅化前处理 tri
+        if tri.dim() == 3 and tri.shape[0] == 1:
+            tri = tri.squeeze(0)
+        tri = tri.contiguous()  # 保证连续内存
+
+        # 空面保护
+        if tri.numel() == 0:
+            H, W = resolution
+            return torch.zeros(H, W, device=device, dtype=torch.float32)
+
         # 齐次坐标
         ones = torch.ones(1, verts.shape[1], 1, device=device, dtype=torch.float32)
         pos = torch.cat((verts, ones), dim=2)  # (1, V, 4)
-        
+
         # MVP 变换
         try:
             view_matrix = torch.inverse(c2ws)
         except:
             view_matrix = torch.linalg.pinv(c2ws)
-        
+
         mat = (projection @ view_matrix).unsqueeze(0)
         pos_clip = pos @ mat.mT
-        
+
         # 光栅化
         rast, _ = dr.rasterize(self.glctx, pos_clip, tri, resolution)
-        
-        # 计算相机空间深度（Z 值）
-        pos_camera = (pos @ view_matrix.unsqueeze(0).mT)[:, :, 2:3]  # (1, V, 1)
-        
+        rast = rast.contiguous()  # 确保连续
+
+        # 相机空间深度
+        pos_camera = (pos @ view_matrix.unsqueeze(0).mT)[:, :, 2:3]
+        pos_camera = pos_camera.contiguous()
+
         # 插值深度
         depth, _ = dr.interpolate(pos_camera, rast, tri)
+        depth = depth.contiguous()
         depth = torch.flip(depth[0, :, :, 0], dims=[0])  # (H, W)
-        
-        # 取绝对值（深度为正）
+
+        # 深度为正
         depth = torch.abs(depth)
-        
+
         return depth
+
 
 
     def compute_vertex_normals(self, verts, faces):

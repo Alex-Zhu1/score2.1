@@ -832,22 +832,45 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         )
 
         # ========== 准备条件特征 ==========
-        images_dict = {'image': image}
-        if hand_image is not None:
-            images_dict['hand'] = hand_image
-        if object_image is not None:
-            images_dict['object'] = object_image
+        # lens = len(image)
+        # if lens == 2:
+        #     images_dict = {
+        #         'image': image[0],
+        #         'hand': image[1],
+        #     }
+        # elif lens == 3:
+        #     images_dict = {
+        #         'image': image[0],
+        #         'hand': image[1],
+        #         'object': image[2],
+        #     }
+        # else:
+        #     images_dict = {
+        #         'image': image,
+        #     }
 
-        cond_features = {}
-        for name, img in images_dict.items():
-            cond_input = self.prepare_image([img], mask)
-            img_tensor = cond_input.pop('image')
-            cond_features[name] = self.encode_cond(
-                image=img_tensor,
-                additional_cond_inputs=cond_input,
-                do_classifier_free_guidance=do_classifier_free_guidance,
-                dual_guidance=False,
-            )
+
+        # cond_features = {}
+        # for name, img in images_dict.items():
+        #     cond_input = self.prepare_image([img], mask)
+        #     img_tensor = cond_input.pop('image')
+        #     cond_features[name] = self.encode_cond(
+        #         image=img_tensor,
+        #         additional_cond_inputs=cond_input,
+        #         do_classifier_free_guidance=do_classifier_free_guidance,
+        #         dual_guidance=False,
+        #     )
+
+        cond_inputs = self.prepare_image(image, mask)
+        image = cond_inputs.pop('image')
+        cond = self.encode_cond(
+            image=image,
+            additional_cond_inputs=cond_inputs,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            dual_guidance=False,
+        )
+        cond_hand = copy.deepcopy(cond)
+        cond_hand['main'] = cond_hand['main'][[1, 3], ...]
 
         cond_ref_input = self.prepare_image(ref, mask)
         ref_image = cond_ref_input.pop('image')
@@ -858,26 +881,26 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             dual_guidance=False,
         )
 
-        cond_hoi = cond_features['image']
-        cond_hand = cond_features.get('hand', None)
-        cond_object = cond_features.get('object', None)
+        # cond_hoi = cond_features['image']
+        # cond_hand = cond_features.get('hand', None)
+        # cond_object = cond_features.get('object', None)
+
+        # # cond = copy.deepcopy(cond_ref)
+        # # cond['main'] = torch.cat(
+        # #     [v['main'][i:i+1, ...] for i in range(2) for v in [cond_hoi, cond_hand, cond_object] if v is not None],
+        # #     dim=0
+        # # )
+        # features_to_concat = []
+        # for i in range(2):
+        #     if cond_hoi is not None:
+        #         features_to_concat.append(cond_hoi['main'][i:i+1, ...])
+        #     if cond_hand is not None:
+        #         features_to_concat.append(cond_hand['main'][i:i+1, ...])
+        #     if cond_object is not None:
+        #         features_to_concat.append(cond_object['main'][i:i+1, ...])
 
         # cond = copy.deepcopy(cond_ref)
-        # cond['main'] = torch.cat(
-        #     [v['main'][i:i+1, ...] for i in range(2) for v in [cond_hoi, cond_hand, cond_object] if v is not None],
-        #     dim=0
-        # )
-        features_to_concat = []
-        for i in range(2):
-            if cond_hoi is not None:
-                features_to_concat.append(cond_hoi['main'][i:i+1, ...])
-            if cond_hand is not None:
-                features_to_concat.append(cond_hand['main'][i:i+1, ...])
-            if cond_object is not None:
-                features_to_concat.append(cond_object['main'][i:i+1, ...])
-
-        cond = copy.deepcopy(cond_ref)
-        cond['main'] = torch.cat(features_to_concat, dim=0)
+        # cond['main'] = torch.cat(features_to_concat, dim=0)
 
 
         batch_size = 1
@@ -926,7 +949,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                     outputs = phase1_scheduler.step(noise_pred, t, latents)
                     latents = outputs.prev_sample
 
-                    if i == 9 or i == num_inference_steps - 1:  # 在第 20 步停止
+                    if i == 9:  # 在第 10 步停止
                         pbar.close()
                         
                         # 导出中间 mesh
@@ -1000,16 +1023,10 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         #     self.scheduler.timesteps = None
         
         # ---------- 第二次 sampling ----------
-        double_branch = True
+        double_branch = False
         if double_branch:
             latents = torch.cat([latents] * 2, dim=0)
-            # cond = cond
-            un_cond = torch.cat([cond_ref['main'][[-1], :, :], cond_ref['main'][[-1], :, :]], dim=0) 
-
-            cond['main'] = torch.cat([
-                cond_ref['main'],
-                un_cond
-            ], dim=0)
+            cond = cond
         else:
             cond = cond_hand
             # cond = cond_hoi
@@ -1031,7 +1048,6 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                     noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
                     
-                # assert To is not None, "Not registration"
                 To = None
                 if 8 < i < 15 and To is not None:
                     mesh_ref = trimesh.load(moge_path, process=False, skip_materials=True)
@@ -1057,7 +1073,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                                                 'fov_x': 41.039776,
                                             }
                                         )
-                    # 导出中间 mesh
+                                            # 导出中间 mesh
                     # mesh_i = self._export(
                     #     outputs.pred_original_sample,
                     #     box_v=box_v,
@@ -1153,11 +1169,9 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         cond_hand = copy.deepcopy(cond)
 
         if do_classifier_free_guidance:
-            # cond_hand = cond   # cond, uncond
-            cond_hand['main'] = torch.cat([cond['main'][[-1], :, :], cond['main'][[-1], :, :]], dim=0)     # uncond, uncond
+            cond_hand = cond   # cond, uncond
         else:
-            cond_hand = [cond['main'][[-1], :, :]]  # uncond only
-            # cond_hand = [cond['main'][[0], :, :]]  # cond only
+            cond_hand = [cond['main'][[-1], :, :]]
 
         inv_scheduler = UniInvEulerScheduler(num_train_timesteps=1000)
         sigmas = np.linspace(0, 1, inversion_steps) if sigmas is None else sigmas  # Hunyuan-3D default
