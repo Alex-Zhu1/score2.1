@@ -513,7 +513,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
             if faces.dim() == 3 and faces.shape[0] == 1:
                 faces = faces.squeeze(0)
-            faces = faces[:, [0, 2, 1]]  # Convert to nvdiffrast's clockwise convention
             faces = faces.to(torch.int32).contiguous()
 
             # if True:
@@ -580,7 +579,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                     f"Total={total_loss.item():.4f}"
                 )
             
-            if opt_step % 10 == 0:
+            if opt_step % 10 == 0 and config.get("save_debug", False):
                 import os
                 os.makedirs("./debug", exist_ok=True)
                 
@@ -597,100 +596,72 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
     
     def render_maps(
         self,
-        verts: torch.Tensor,   # [V,3] 已在 MOGE 相机坐标系中
+        verts: torch.Tensor,
         faces: torch.Tensor,
         fov_x: float,
         fov_y: float,
         render_res: Tuple[int, int] = (224, 224),
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Render normal map, alpha map, and silhouette using nvdiffrast.
-        Assumes verts are already in the camera coordinate system.
-        """
+        """Render normal map, alpha map, and silhouette."""
         device = verts.device
+        
         verts = verts.unsqueeze(0)
-        faces = faces.to(torch.int32).contiguous()
-
-        # === 相机内参 ===
+        faces = faces.unsqueeze(0)
+        
         W, H = render_res
         fx = W / (2 * np.tan(np.deg2rad(fov_x) / 2))
         fy = H / (2 * np.tan(np.deg2rad(fov_y) / 2))
         cx, cy = W / 2, H / 2
-
-        # === 顶点法线 & RGBA ===
-        normals = self._compute_vertex_normals(verts[0], faces).unsqueeze(0)
+        
+        projection = torch.tensor([
+            [fx, 0, cx, 0],
+            [0, fy, cy, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ], device=device, dtype=torch.float32)
+        
+        c2ws = torch.eye(4, device=device, dtype=torch.float32)
+        
+        normals = self._compute_vertex_normals(verts[0], faces[0]).unsqueeze(0)
         normal_colors = ((normals + 1.0) / 2.0).clamp(0, 1)
         alpha = torch.ones_like(normal_colors[..., :1])
-        rgba = torch.cat([normal_colors, alpha], dim=-1).to(torch.float32).contiguous()
-
-        # === 调用改进版 renderer（相机坐标空间） ===
-        normal_map, alpha_map = self._renderer_camera_space(
-            verts, faces, rgba, fx, fy, cx, cy, (H, W)
-        )
-
+        rgba = torch.cat([normal_colors, alpha], dim=-1)
+        
+        normal_map, alpha_map = self._renderer(
+            verts, faces[0], rgba[0], projection, c2ws, (H, W)
+        )   # 渲染
+        
         silhouette = (alpha_map > 0.5).float()
+        
         return normal_map.clamp(0, 1), alpha_map.clamp(0, 1), silhouette
-
-
-    def _renderer_camera_space(
-        self,
-        verts: torch.Tensor,   # [1,V,3] or [V,3]
-        tri: torch.Tensor,     # [F,3]
-        attr: torch.Tensor,    # [1,V,C]
-        fx: float, fy: float, cx: float, cy: float,
-        resolution: Tuple[int, int],
-        znear: float = 0.01,
-        zfar: float = 100.0,
+    
+    def _renderer(
+        self, 
+        verts: torch.Tensor,  # [1, V, 3]，在 MOGE 相机坐标系中
+        tri: torch.Tensor,    # [F, 3]
+        attr: torch.Tensor,   # [1, V, C]
+        projection: torch.Tensor,  # K 矩阵扩展成 4x4
+        c2ws: torch.Tensor,        # 相机外参（=I）
+        resolution: Tuple[int, int]
     ):
         device = verts.device
-        H, W = resolution
 
         if self.glctx is None:
             self._init_glctx()
 
-        # === shape 规范化 ===
-        if verts.dim() == 2:
-            verts = verts.unsqueeze(0)  # [1,V,3]
-        if tri.dim() == 3 and tri.shape[0] == 1:
-            tri = tri.squeeze(0)
         tri = tri.to(torch.int32).contiguous()
+        verts = verts.to(torch.float32).contiguous()
+        attr = attr.to(torch.float32).contiguous()
 
-        if verts.shape[1] == 0 or tri.shape[0] == 0:
-            print("[Warning] Empty verts or faces — skip rasterization.")
-            return (
-                torch.zeros((H, W, 3), device=device),
-                torch.zeros((H, W), device=device)
-            )
+        ones = torch.ones(verts.shape[0], verts.shape[1], 1, device=device)
+        pos = torch.cat((verts, ones), dim=2)  # [1, V, 4]
 
-        # === 相机投影到 clip space ===
-        X, Y, Z = verts[..., 0], verts[..., 1], verts[..., 2].clamp(min=1e-6)
-        x_img = fx * (X / Z) + cx
-        y_img = fy * (Y / Z) + cy
+        # 这里的 c2ws 是单位矩阵（因为 verts 已经在相机坐标系中）
+        view_matrix = torch.linalg.inv(c2ws)
+        mat = (projection @ view_matrix).unsqueeze(0)
+        pos_clip = (pos @ mat.mT).contiguous()
 
-        x_ndc = (x_img / (W - 1)) * 2 - 1
-        y_ndc = (y_img / (H - 1)) * 2 - 1
-        y_ndc = -y_ndc
-        z_ndc = 2 * (Z - znear) / (zfar - znear) - 1
-
-        pos_clip = torch.stack(
-            [x_ndc, y_ndc, z_ndc, torch.ones_like(z_ndc)], dim=-1
-        )  # shape = [1,V,4] or [V,4]
-
-        # ✅ 修正关键：仅当没有 batch 维时再加
-        if pos_clip.dim() == 2:
-            pos_clip = pos_clip.unsqueeze(0)  # [1,V,4]
-
-        # 🧩 调试输出
-        # print(f"[DEBUG] pos_clip.shape={pos_clip.shape}, tri.shape={tri.shape}")
-
-        # === Rasterize ===
         rast, _ = dr.rasterize(self.glctx, pos_clip, tri, resolution)
-        if rast[..., 3].max() <= 0:
-            print("[Warning] Empty raster result.")
-            img = torch.zeros((H, W, 3), device=device)
-            alpha = torch.zeros((H, W), device=device)
-            return img, alpha
-
         out, _ = dr.interpolate(attr, rast, tri)
         out = dr.antialias(out, rast, pos_clip, tri)
 
@@ -698,6 +669,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         alpha = torch.flip(out[0, :, :, 3], dims=[0])
         return img, alpha
 
+    
     def _compute_vertex_normals(
         self, 
         verts: torch.Tensor, 

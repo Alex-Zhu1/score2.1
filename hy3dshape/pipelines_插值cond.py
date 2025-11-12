@@ -100,25 +100,16 @@ def retrieve_timesteps(
 
 
 @synchronize_timer('Export to trimesh')
-def export_to_trimesh(mesh_output, mc_algo='mc'):
+def export_to_trimesh(mesh_output):
     if isinstance(mesh_output, list):
         outputs = []
         for mesh in mesh_output:
             if mesh is None:
                 outputs.append(None)
             else:
-                if mc_algo == 'dmc':
-                    mesh_v, mesh_f = mesh # 这里是tensor
-                    mesh_f = mesh_f.detach().cpu().numpy()
-                    mesh_v = mesh_v.detach().cpu().numpy()
-                    mesh_v = mesh_v.astype(np.float32)
-                    mesh_f = np.ascontiguousarray(mesh_f)[:, ::-1]
-                    mesh_output = trimesh.Trimesh(mesh_v, mesh_f)
-                    outputs.append(mesh_output)
-                else:
-                    mesh.mesh_f = mesh.mesh_f[:, ::-1]
-                    mesh_output = trimesh.Trimesh(mesh.mesh_v, mesh.mesh_f)
-                    outputs.append(mesh_output)
+                mesh.mesh_f = mesh.mesh_f[:, ::-1]
+                mesh_output = trimesh.Trimesh(mesh.mesh_v, mesh.mesh_f)
+                outputs.append(mesh_output)
         return outputs
     else:
         mesh_output.mesh_f = mesh_output.mesh_f[:, ::-1]
@@ -563,10 +554,10 @@ class Hunyuan3DDiTPipeline:
     def set_surface_extractor(self, mc_algo):
         if mc_algo is None:
             return
-        # logger.info('The parameters `mc_algo` is deprecated, and will be removed in future versions.\n'
-        #             'Please use: \n'
-        #             'from hy3dshape.models.autoencoders import SurfaceExtractors\n'
-        #             'pipeline.vae.surface_extractor = SurfaceExtractors[mc_algo]() instead\n')
+        logger.info('The parameters `mc_algo` is deprecated, and will be removed in future versions.\n'
+                    'Please use: \n'
+                    'from hy3dshape.models.autoencoders import SurfaceExtractors\n'
+                    'pipeline.vae.surface_extractor = SurfaceExtractors[mc_algo]() instead\n')
         if mc_algo not in SurfaceExtractors.keys():
             raise ValueError(f"Unknown mc_algo {mc_algo}")
         self.vae.surface_extractor = SurfaceExtractors[mc_algo]()
@@ -676,8 +667,6 @@ class Hunyuan3DDiTPipeline:
         self,
         latents,
         output_type='trimesh',
-        requires_grad=False,
-        use_checkpoint=False,
         box_v=1.01,
         mc_level=0.0,
         num_chunks=8000,
@@ -685,11 +674,6 @@ class Hunyuan3DDiTPipeline:
         mc_algo='mc',
         enable_pbar=True
     ):
-        if mc_algo == 'mc':
-            self.set_surface_extractor('mc')
-        elif mc_algo == 'dmc':
-            self.set_surface_extractor('dmc')
-
         if not output_type == "latent":
             latents = 1. / self.vae.scale_factor * latents
             latents = self.vae(latents)
@@ -701,14 +685,12 @@ class Hunyuan3DDiTPipeline:
                 octree_resolution=octree_resolution,
                 mc_algo=mc_algo,
                 enable_pbar=enable_pbar,
-                requires_grad=requires_grad,
-                use_checkpoint=use_checkpoint,   # ✅ 控制是否启用 checkpoint
             )
         else:
             outputs = latents
 
         if output_type == 'trimesh':
-            outputs = export_to_trimesh(outputs, mc_algo=mc_algo)
+            outputs = export_to_trimesh(outputs)
 
         return outputs
 
@@ -839,7 +821,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         **kwargs,
     ) -> List[List[trimesh.Trimesh]]:
 
-        # self.set_surface_extractor(mc_algo)
+        self.set_surface_extractor(mc_algo)
 
         device = self.device
         dtype = self.dtype
@@ -954,8 +936,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                             mc_level=mc_level,
                             num_chunks=num_chunks,
                             octree_resolution=octree_resolution,
-                            # mc_algo='mc',
-                            # requires_grad=True,
+                            mc_algo=mc_algo,
                             enable_pbar=enable_pbar,
                         )
 
@@ -1012,7 +993,6 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                         torch.cuda.empty_cache()
                         torch.cuda.synchronize()
                         break
-        # ========== 第一阶段采样结束：为了inversion以及配准参数，耗时 8s（sampling）+ 3s (registration) + 11s (inversion) ==========
 
         # 🔧 重置 scheduler 状态, 避免影响
         self.scheduler._step_index = None
@@ -1038,6 +1018,9 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         def lambda_t(t_scalar):
             k, t_mid = 8.0, 0.6  # steepness and midpoint
             return torch.sigmoid(k * (t_scalar - t_mid))
+        cond_interp = copy.deepcopy(cond)
+        cond_hand = cond_hoi['main']
+        cond_hoi  = cond_object['main']
         
         # ========== Phase 2: Full Sampling ==========
         with synchronize_timer('Phase 2: Full Sampling'):
@@ -1051,25 +1034,28 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                 timestep = timestep / self.scheduler.config.num_train_timesteps
 
                 # 更新
-                # lam = lambda_t(timestep)[0]  # shape [B,1]
+                lam = lambda_t(timestep).view(-1, 1, 1)  # shape [B,1]
+                # 3️⃣ Interpolate DINO conditions
+                # cond['hand'] and cond['hand_obj'] are (B, D) embeddings
+                cond_interp['main'] = (1 - lam) * cond_hoi + lam * cond_hand
                 
-                noise_pred = self.model(latent_model_input, timestep, cond, guidance=guidance)  # 插值cond
+                noise_pred = self.model(latent_model_input, timestep, cond_interp, guidance=guidance)  # 插值cond
 
                 if do_classifier_free_guidance:
                     noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
+                    
                 # assert To is not None, "Not registration"
-                # To = None
+                To = None
                 if 8 < i < 15 and To is not None:
-                    # mesh_ref = trimesh.load(moge_path, process=False, skip_materials=True)
-                    # # 若是 Scene，则合并为单一 Trimesh
-                    # if isinstance(mesh_ref, trimesh.Scene):
-                    #     mesh_ref = trimesh.util.concatenate(
-                    #         [trimesh.Trimesh(vertices=g.vertices, faces=g.faces) for g in mesh_ref.geometry.values()]
-                    #     )
-                    # else:
-                    #     mesh_ref = mesh_ref
+                    mesh_ref = trimesh.load(moge_path, process=False, skip_materials=True)
+                    # 若是 Scene，则合并为单一 Trimesh
+                    if isinstance(mesh_ref, trimesh.Scene):
+                        mesh_ref = trimesh.util.concatenate(
+                            [trimesh.Trimesh(vertices=g.vertices, faces=g.faces) for g in mesh_ref.geometry.values()]
+                        )
+                    else:
+                        mesh_ref = mesh_ref
                     outputs = self.scheduler.step(
                                             noise_pred,
                                             t,
@@ -1077,6 +1063,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                                             To=To,
                                             _export=self._export,
                                             enable_guidance_2d=True,
+                                            mesh_ref=mesh_ref,
                                             guidance_config={
                                                 'num_steps': 30,
                                                 'lr_velocity': 0.0001,
@@ -1114,7 +1101,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         return self._export(
             latents,
             output_type,
-            box_v, mc_level, num_chunks, octree_resolution, mc_algo='mc',
+            box_v, mc_level, num_chunks, octree_resolution, mc_algo,
             enable_pbar=enable_pbar,
         )
 

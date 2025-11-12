@@ -70,7 +70,7 @@ class SurfaceExtractor:
         """
         return NotImplementedError
 
-    def __call__(self, grid_logits, **kwargs):
+    def __call__(self, grid_logits, requires_grad: bool = False, **kwargs):
         """
         Process a batch of grid logits to extract surface meshes.
 
@@ -85,10 +85,17 @@ class SurfaceExtractor:
         outputs = []
         for i in range(grid_logits.shape[0]):
             try:
-                vertices, faces = self.run(grid_logits[i], **kwargs)
-                vertices = vertices.astype(np.float32)
-                faces = np.ascontiguousarray(faces)
-                outputs.append(Latent2MeshOutput(mesh_v=vertices, mesh_f=faces))
+                result = self.run(grid_logits[i], requires_grad=requires_grad, **kwargs)
+                if requires_grad:
+                    # ✅ 可微版本，直接返回 Tensor
+                    verts, faces = result
+                    outputs.append((verts, faces))
+                else:
+                    # 🚫 非可微版本，numpy + 封装成 Latent2MeshOutput
+                    vertices, faces = result
+                    vertices = vertices.astype(np.float32)
+                    faces = np.ascontiguousarray(faces)
+                    outputs.append(Latent2MeshOutput(mesh_v=vertices, mesh_f=faces))
 
             except Exception:
                 import traceback
@@ -125,7 +132,7 @@ class MCSurfaceExtractor(SurfaceExtractor):
 
 
 class DMCSurfaceExtractor(SurfaceExtractor):
-    def run(self, grid_logit, *, octree_resolution, **kwargs):
+    def run(self, grid_logit, *, octree_resolution, requires_grad, **kwargs):
         """
         Extract surface mesh using Differentiable Marching Cubes (DMC) algorithm.
 
@@ -153,8 +160,15 @@ class DMCSurfaceExtractor(SurfaceExtractor):
         sdf = sdf.to(torch.float32).contiguous()
         verts, faces = self.dmc(sdf, deform=None, return_quads=False, normalize=True)
         verts = center_vertices(verts)
-        vertices = verts.detach().cpu().numpy()
-        faces = faces.detach().cpu().numpy()[:, ::-1]
+
+        if requires_grad:
+            # 保持可微（Torch Tensor）
+            idx = torch.arange(faces.shape[1]-1, -1, -1, device=faces.device)
+            faces = faces[:, idx]  # 通用反转，不假设面顶点数
+            return verts, faces
+        else:
+            vertices = verts.detach().cpu().numpy()
+            faces = faces.detach().cpu().numpy()[:, ::-1]
         return vertices, faces
 
 
