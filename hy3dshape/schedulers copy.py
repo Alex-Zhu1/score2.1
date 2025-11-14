@@ -445,7 +445,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                         p.requires_grad_(False)
         
         # === Hyperparameters ===
-        num_steps = config.get("num_steps", 50)
+        num_steps = config.get("num_steps", 5)
         lr_velocity = config.get("lr_velocity", 1e-4)
         lr_scale = config.get("lr_scale", 0.01)
         lr_rotation = config.get("lr_rotation", 0.01)

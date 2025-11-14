@@ -100,14 +100,14 @@ def retrieve_timesteps(
 
 
 @synchronize_timer('Export to trimesh')
-def export_to_trimesh(mesh_output, mc_algo='mc'):
+def export_to_trimesh(mesh_output, mc_algo='mc', requires_grad=False):
     if isinstance(mesh_output, list):
         outputs = []
         for mesh in mesh_output:
             if mesh is None:
                 outputs.append(None)
             else:
-                if mc_algo == 'dmc':
+                if requires_grad:
                     mesh_v, mesh_f = mesh # 这里是tensor
                     mesh_f = mesh_f.detach().cpu().numpy()
                     mesh_v = mesh_v.detach().cpu().numpy()
@@ -116,6 +116,12 @@ def export_to_trimesh(mesh_output, mc_algo='mc'):
                     mesh_output = trimesh.Trimesh(mesh_v, mesh_f)
                     outputs.append(mesh_output)
                 else:
+                    # if mc_algo == 'dmc':
+                    #     mesh_v, mesh_f = mesh
+                    #     mesh_f = mesh_f[:, ::-1]
+                    #     mesh_output = trimesh.Trimesh(mesh_v, mesh_f)
+                    #     outputs.append(mesh_output)
+                    # else:
                     mesh.mesh_f = mesh.mesh_f[:, ::-1]
                     mesh_output = trimesh.Trimesh(mesh.mesh_v, mesh.mesh_f)
                     outputs.append(mesh_output)
@@ -676,14 +682,14 @@ class Hunyuan3DDiTPipeline:
         self,
         latents,
         output_type='trimesh',
-        requires_grad=False,
-        use_checkpoint=False,
         box_v=1.01,
         mc_level=0.0,
         num_chunks=8000,
         octree_resolution=256,
-        mc_algo='mc',
-        enable_pbar=True
+        mc_algo='dmc',
+        enable_pbar=True,
+        requires_grad=False,
+        use_checkpoint=False,
     ):
         if mc_algo == 'mc':
             self.set_surface_extractor('mc')
@@ -708,106 +714,9 @@ class Hunyuan3DDiTPipeline:
             outputs = latents
 
         if output_type == 'trimesh':
-            outputs = export_to_trimesh(outputs, mc_algo=mc_algo)
+            outputs = export_to_trimesh(outputs, mc_algo=mc_algo, requires_grad=requires_grad)
 
         return outputs
-
-
-class Hunyuan3DDiTFlowMatchingPipeline_ori(Hunyuan3DDiTPipeline):
-
-    @torch.inference_mode()
-    def __call__(
-        self,
-        image: Union[str, List[str], Image.Image, dict, List[dict], torch.Tensor] = None,
-        num_inference_steps: int = 20,
-        timesteps: List[int] = None,
-        sigmas: List[float] = None,
-        eta: float = 0.0,
-        guidance_scale: float = 5.0,
-        generator=None,
-        box_v=1.01,
-        octree_resolution=256,
-        mc_level=0.0,
-        mc_algo=None,
-        num_chunks=8000,
-        output_type: Optional[str] = "trimesh",
-        enable_pbar=True,
-        mask = None,
-        **kwargs,
-    ) -> List[List[trimesh.Trimesh]]:
-        callback = kwargs.pop("callback", None)
-        callback_steps = kwargs.pop("callback_steps", None)
-
-        self.set_surface_extractor(mc_algo)
-
-        device = self.device
-        dtype = self.dtype
-        do_classifier_free_guidance = guidance_scale >= 0 and not (
-            hasattr(self.model, 'guidance_embed') and
-            self.model.guidance_embed is True
-        )
-
-        # print('image', type(image), 'mask', type(mask))
-        cond_inputs = self.prepare_image(image, mask)
-        image = cond_inputs.pop('image')
-        cond = self.encode_cond(
-            image=image,
-            additional_cond_inputs=cond_inputs,
-            do_classifier_free_guidance=do_classifier_free_guidance,
-            dual_guidance=False,
-        )
-
-        batch_size = image.shape[0]
-
-        # 5. Prepare timesteps
-        # NOTE: this is slightly different from common usage, we start from 0.
-        sigmas = np.linspace(0, 1, num_inference_steps) if sigmas is None else sigmas
-        timesteps, num_inference_steps = retrieve_timesteps(
-            self.scheduler,
-            num_inference_steps,
-            device,
-            sigmas=sigmas,
-        )
-        latents = self.prepare_latents(batch_size, dtype, device, generator)
-
-        guidance = None
-        if hasattr(self.model, 'guidance_embed') and \
-            self.model.guidance_embed is True:
-            guidance = torch.tensor([guidance_scale] * batch_size, device=device, dtype=dtype)
-            # logger.info(f'Using guidance embed with scale {guidance_scale}')
-
-        with synchronize_timer('Diffusion Sampling'):
-            for i, t in enumerate(tqdm(timesteps, disable=not enable_pbar, desc="Diffusion Sampling:")):
-                # expand the latents if we are doing classifier free guidance
-                if do_classifier_free_guidance:
-                    latent_model_input = torch.cat([latents] * 2)
-                else:
-                    latent_model_input = latents
-
-                # NOTE: we assume model get timesteps ranged from 0 to 1
-                timestep = t.expand(latent_model_input.shape[0]).to(latents.dtype)
-                timestep = timestep / self.scheduler.config.num_train_timesteps
-                noise_pred = self.model(latent_model_input, timestep, cond, guidance=guidance)
-
-                if do_classifier_free_guidance:
-                    noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-                # compute the previous noisy sample x_t -> x_t-1
-                outputs = self.scheduler.step(noise_pred, t, latents)
-                latents = outputs.prev_sample
-
-                if callback is not None and i % callback_steps == 0:
-                    step_idx = i // getattr(self.scheduler, "order", 1)
-                    callback(step_idx, t, outputs)
-
-        return self._export(
-            latents,
-            output_type,
-            box_v, mc_level, num_chunks, octree_resolution, mc_algo,
-            enable_pbar=enable_pbar,
-        )
-    
 
 class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
     # @torch.inference_mode()
@@ -950,12 +859,12 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                         # 导出中间 mesh
                         mesh_i = self._export(
                             outputs.pred_original_sample,
+                            output_type="trimesh",
                             box_v=box_v,
                             mc_level=mc_level,
                             num_chunks=num_chunks,
                             octree_resolution=octree_resolution,
-                            # mc_algo='mc',
-                            # requires_grad=True,
+                            mc_algo="dmc",
                             enable_pbar=enable_pbar,
                         )
 
@@ -971,10 +880,11 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                             else:
                                 mesh_i.export(f"{dir}/check_step10_{time.time()}.glb")
 
-                        # Registration
+                        # # Registration
                         print(f"[Phase 1] Start registration + inversion...")
+                        import time
                         start_time = time.perf_counter()  # ⏱️ 开始计时
-                        Th, To = self.registration(
+                        Th, To_m = self.registration(
                             hunyuan_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
                             hamer_mesh=mesh_path,
                             moge_pointmap=moge_path,
@@ -989,7 +899,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                         latents = self.inversion(
                             mesh_path=mesh_path,
                             Th=Th,
-                            To=To,
+                            To=To_m,
                             device=device,
                             batch_size=batch_size,
                             inversion=inversion,
@@ -997,7 +907,6 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                             octree_resolution=octree_resolution,
                             mc_level=mc_level,
                             num_chunks=num_chunks,
-                            mc_algo=mc_algo,
                             enable_pbar=enable_pbar,
                             cond=cond_hand,
                             num_inference_steps=num_inference_steps,
@@ -1008,7 +917,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                         )
                         
                         # 🔧 清理 Phase 1 资源
-                        del outputs, mesh_i, phase1_scheduler
+                        del outputs, mesh_i, phase1_scheduler, Th
                         torch.cuda.empty_cache()
                         torch.cuda.synchronize()
                         break
@@ -1039,6 +948,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             k, t_mid = 8.0, 0.6  # steepness and midpoint
             return torch.sigmoid(k * (t_scalar - t_mid))
         
+        # latents = self.prepare_latents(batch_size, dtype, device, generator)   #TODO 一旦inversion，那么两次sampling出来的mesh不一样大
         # ========== Phase 2: Full Sampling ==========
         with synchronize_timer('Phase 2: Full Sampling'):
             for i, t in enumerate(tqdm(timesteps, disable=not enable_pbar, desc="(Phase 2) Full Sampling:")):
@@ -1053,59 +963,107 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                 # 更新
                 # lam = lambda_t(timestep)[0]  # shape [B,1]
                 
-                noise_pred = self.model(latent_model_input, timestep, cond, guidance=guidance)  # 插值cond
+                noise_pred = self.model(latent_model_input, timestep, cond_hoi, guidance=guidance)  # 插值cond
 
                 if do_classifier_free_guidance:
                     noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
-                # assert To is not None, "Not registration"
-                # To = None
-                if 8 < i < 15 and To is not None:
-                    # mesh_ref = trimesh.load(moge_path, process=False, skip_materials=True)
-                    # # 若是 Scene，则合并为单一 Trimesh
-                    # if isinstance(mesh_ref, trimesh.Scene):
-                    #     mesh_ref = trimesh.util.concatenate(
-                    #         [trimesh.Trimesh(vertices=g.vertices, faces=g.faces) for g in mesh_ref.geometry.values()]
+                # step更新速度场
+                To = To_m
+                if i <= 8 or i >= 15:
+                    outputs = self.scheduler.step(noise_pred, t, latents)
+
+                    # if i == 8:
+                    #     # 导出中间 mesh
+                    #     mesh_i = self._export(
+                    #         outputs.pred_original_sample,
+                    #         output_type="trimesh",
+                    #         box_v=box_v,
+                    #         mc_level=mc_level,
+                    #         num_chunks=num_chunks,
+                    #         octree_resolution=octree_resolution,
+                    #         mc_algo="dmc",
+                    #         enable_pbar=enable_pbar,
                     #     )
-                    # else:
-                    #     mesh_ref = mesh_ref
+
+                    #     # 进行Phase 2的mesh进一步registration
+                    #     To = align_meshes(
+                    #                     source_mesh_path=None,
+                    #                     source_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
+                    #                     target_mesh_path=moge_path,
+                    #                     skip_coarse=True,
+                    #                     # transformed_mesh_path="Phase2_hunyuan_registered.glb"
+                    #                 )  # 这里面的apply_transform是in place 操作，所以直接修改了mesh
+                        
+                    #     # 可视化（可选）
+                    #     if enable_pbar:
+                    #         print(f"[Phase 2] Exporting intermediate mesh at step {i+1}")
+                    #         dir = "vis_phase2_mid_mesh"
+                    #         os.makedirs(dir, exist_ok=True)
+                    #         import time
+
+                    #         if isinstance(mesh_i, list):
+                    #             for midx, m in enumerate(mesh_i):
+
+                    #                 # ----- 1. 保存未应用 To 的 mesh -----
+                    #                 m_orig = m.copy()  # 一定要 copy，否则会被改坏
+                    #                 m_orig.export(f"{dir}/phase2_step{i+1}_orig_{midx}_{time.time()}.glb")
+
+                    #                 # ----- 2. 保存应用 To 之后的 mesh -----
+                    #                 m_trans = m.copy()
+                    #                 m_trans.apply_transform(To)
+                    #                 m_trans.export(f"{dir}/phase2_step{i+1}_to_{midx}_{time.time()}.glb")
+
+                    #         else:
+                    #             # 单个 mesh 的情况
+                    #             m_orig = mesh_i.copy()
+                    #             m_orig.export(f"{dir}/phase2_step{i}_orig_{time.time()}.glb")
+
+                    #             m_trans = mesh_i.copy()
+                    #             m_trans.apply_transform(To)
+                    #             m_trans.export(f"{dir}/phase2_step{i}_to_{time.time()}.glb")
+
+        
+                elif 8 < i < 15 and To is not None:
                     outputs = self.scheduler.step(
                                             noise_pred,
                                             t,
                                             latents,
+                                            enable_guidance_2d=True,
                                             To=To,
                                             _export=self._export,
-                                            enable_guidance_2d=True,
                                             guidance_config={
                                                 'num_steps': 30,
-                                                'lr_velocity': 0.0001,
-                                                'weight_norm': 10.0,
+                                                # 'lr_velocity': 0.0001,
+                                                # 'weight_norm': 10.0,
                                                 'fov_x': 41.039776,
                                             }
                                         )
-                    # 导出中间 mesh
-                    # mesh_i = self._export(
-                    #     outputs.pred_original_sample,
-                    #     box_v=box_v,
-                    #     mc_level=mc_level,
-                    #     num_chunks=num_chunks,
-                    #     octree_resolution=octree_resolution,
-                    #     mc_algo=mc_algo,
-                    #     enable_pbar=enable_pbar,
-                    # )
+                    if i == 9:
+                        # 导出中间 mesh
+                        mesh_i = self._export(
+                            outputs.pred_original_sample,
+                            box_v=box_v,
+                            mc_level=mc_level,
+                            num_chunks=num_chunks,
+                            octree_resolution=octree_resolution,
+                            mc_algo="dmc",
+                            enable_pbar=enable_pbar,
+                        )
 
-                    # # 可视化（可选）
-                    # if enable_pbar:
-                    #     print(f"[Phase 1] Exporting intermediate mesh at step {i+1}")
-                    #     dir = "vis_phase1_mid_mesh"
-                    #     os.makedirs(dir, exist_ok=True)
-                    #     import time
-                    #     if isinstance(mesh_i, list):
-                    #         for midx, m in enumerate(mesh_i):
-                    #             m.export(f"{dir}/phase2_check_step10_{midx}_{time.time()}.glb")
-                    #     else:
-                    #         mesh_i.export(f"{dir}/phase2_check_step10_{time.time()}.glb")
+                        # 可视化（可选）
+                        if enable_pbar:
+                            print(f"[Phase 1] Exporting intermediate mesh at step {i+1}")
+                            dir = "vis_phase2_mid_mesh"
+                            os.makedirs(dir, exist_ok=True)
+                            import time
+                            if isinstance(mesh_i, list):
+                                for midx, m in enumerate(mesh_i):
+                                    m.apply_transform(To)  # 转到pointmap空间。这里有个问题，为什么inversion用的mesh 和 第一次infer出来的mesh维度不一样呢
+                                    m.export(f"{dir}/phase2_check_step10_{midx}_{time.time()}.glb")
+                            else:
+                                mesh_i.export(f"{dir}/phase2_check_step10_{time.time()}.glb")
                 else:
                     outputs = self.scheduler.step(noise_pred, t, latents)
                     
@@ -1180,8 +1138,8 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         cond_hand = copy.deepcopy(cond)
 
         if do_classifier_free_guidance:
-            cond_hand = cond   # cond, uncond
-            # cond_hand['main'] = torch.cat([cond['main'][[-1], :, :], cond['main'][[-1], :, :]], dim=0)     # uncond, uncond
+            # cond_hand = cond   # cond, uncond
+            cond_hand['main'] = torch.cat([cond['main'][[-1], :, :], cond['main'][[-1], :, :]], dim=0)     # uncond, uncond
         else:
             cond_hand = [cond['main'][[-1], :, :]]  # uncond only
             # cond_hand = [cond['main'][[0], :, :]]  # cond only
@@ -1229,7 +1187,6 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         octree_resolution=256,
         mc_level=-1 / 512,
         num_chunks=8000,
-        mc_algo=None,
         enable_pbar=True,
         cond: torch.FloatTensor = None,
         num_inference_steps: int = 20,
@@ -1262,7 +1219,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                     mc_level=mc_level,
                     num_chunks=num_chunks,
                     octree_resolution=octree_resolution,
-                    mc_algo=mc_algo,
+                    mc_algo='dmc',
                     enable_pbar=enable_pbar,
                 )
                 mesh = export_to_trimesh(outputs)
@@ -1321,14 +1278,6 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
     
 
     def visualize_cond_inputs(self, cond_inputs, save_dir="cond_inputs_vis"):
-        """
-        可视化 cond_inputs 中的所有 image 和 mask, 并保存为 PNG 文件。
-
-        参数:
-            cond_inputs (dict): 包含 'image' 和 'mask' 的 tensor
-            save_dir (str): 保存图片的目录
-        """
-
         os.makedirs(save_dir, exist_ok=True)
 
         def tensor_to_numpy(tensor):

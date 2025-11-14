@@ -5,6 +5,11 @@
             "path": "infer_output",
             "envManager": "ms-python.python:conda",
             "packageManager": "ms-python.python:conda"
+        },
+        {
+            "path": "debug_2d_guidance",
+            "envManager": "ms-python.python:conda",
+            "packageManager": "ms-python.python:conda"
         }
     ],
     "python-envs.defaultPackageManager": "ms-python.python:conda"

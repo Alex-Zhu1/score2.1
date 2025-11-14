@@ -98,6 +98,7 @@ def main(args):
         args.model_path,
         device=args.device
     )
+    pipeline_shapegen.enable_flashvdm(mc_algo='dmc')  # enable flash VDM for faster inference
 
     rembg = BackgroundRemover()
 
@@ -119,7 +120,7 @@ def main(args):
         moge_hand_path=args.moge_hand_path,
         num_inference_steps=args.num_inference_steps,
         guidance_scale=args.guidance_scale,
-        # generator=torch.Generator(device=args.device).manual_seed(args.seed), # 跟sd一样，一旦确定generator, inversion结果就很差
+        # generator=torch.Generator(device=args.device).manual_seed(args.seed), # 这里很奇怪，generator对第一次sampling过程没有影响，但对我inversion的结果影响很大
         output_type="mesh",
         do_inversion_stage=True
     )

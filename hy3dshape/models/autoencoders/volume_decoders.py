@@ -453,7 +453,7 @@ class FlashVDMVolumeDecoding:
         for i, resolution in enumerate(resolutions[1:]):
             resolutions[i + 1] = resolutions[0] * 2 ** (i + 1)
 
-        logger.info(f"FlashVDMVolumeDecoding Resolution: {resolutions}")
+        # logger.info(f"FlashVDMVolumeDecoding Resolution: {resolutions}")
 
         # 1. generate query points
         if isinstance(bounds, float):

@@ -87,7 +87,6 @@ class SurfaceExtractor:
             try:
                 result = self.run(grid_logits[i], requires_grad=requires_grad, **kwargs)
                 if requires_grad:
-                    # ✅ 可微版本，直接返回 Tensor
                     verts, faces = result
                     outputs.append((verts, faces))
                 else:
@@ -158,8 +157,8 @@ class DMCSurfaceExtractor(SurfaceExtractor):
                 raise ImportError("Please install diso via `pip install diso`, or set mc_algo to 'mc'")
         sdf = -grid_logit / octree_resolution
         sdf = sdf.to(torch.float32).contiguous()
-        verts, faces = self.dmc(sdf, deform=None, return_quads=False, normalize=True)
-        verts = center_vertices(verts)
+        verts, faces = self.dmc(sdf, deform=None, return_quads=False, normalize=False)
+        # verts = center_vertices(verts)  # 这里改变了 verts的值，也就是缩放了w 
 
         if requires_grad:
             # 保持可微（Torch Tensor）

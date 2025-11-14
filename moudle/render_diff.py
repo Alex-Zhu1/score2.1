@@ -139,7 +139,7 @@ def visualize_outputs(outputs, step, save_dir="./debug"):
 # 示例：可微优化 + 可视化
 # ===========================================================
 if __name__ == "__main__":
-    mesh = trimesh.load("/home/haiming.zhu/hoi/InvScore/hunyuan_registered.glb", process=False)
+    mesh = trimesh.load("/home/haiming.zhu/HOI/score2.1/hunyuan_registered.glb", process=False)
     if isinstance(mesh, trimesh.Scene):
         mesh = trimesh.util.concatenate(mesh.dump())
     verts = torch.from_numpy(mesh.vertices).float().cuda()
