@@ -32,7 +32,7 @@ import torch.nn as nn
 import yaml
 
 from .attention_blocks import FourierEmbedder, Transformer, CrossAttentionDecoder, PointCrossAttentionEncoder
-from .surface_extractors import MCSurfaceExtractor, SurfaceExtractors
+from .surface_extractors import MCSurfaceExtractor, SurfaceExtractors, DMCSurfaceExtractor
 from .volume_decoders import VanillaVolumeDecoder, FlashVDMVolumeDecoding, HierarchicalVolumeDecoding
 from ...utils import logger, synchronize_timer, smart_load_model
 
@@ -204,7 +204,7 @@ class VectsetVAE(nn.Module):
         if volume_decoder is None:
             volume_decoder = VanillaVolumeDecoder()
         if surface_extractor is None:
-            surface_extractor = MCSurfaceExtractor()
+            surface_extractor = DMCSurfaceExtractor()
         self.volume_decoder = volume_decoder
         self.surface_extractor = surface_extractor
 

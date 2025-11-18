@@ -394,9 +394,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         # === Hyperparameters ===
         num_steps = config.get("num_steps", 50)
         lr_velocity = config.get("lr_velocity", 1e-2)
-        lr_scale = config.get("lr_scale", 0.001)
-        lr_rotation = config.get("lr_rotation", 0.001)
-        lr_translation = config.get("lr_translation", 0.001)
+        lr_scale = config.get("lr_scale", 1e-4)
+        lr_rotation = config.get("lr_rotation", 5e-4)
+        lr_translation = config.get("lr_translation", 5e-4 )
 
         weight_norm = config.get("weight_norm", 10.0)
         weight_sil = config.get("weight_sil", 10.0)
@@ -416,10 +416,19 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         Kp = self.renderer.fov_to_K_normalized(fov_x, width, height)
 
         # === Optimizable Parameters ===
-        para_velocity = model_output.clone().detach().requires_grad_(True)
-        rotvec = torch.zeros(3, device=device, requires_grad=True)   # axis-angle
-        scale = torch.ones(3, device=device, requires_grad=True)
-        translation = torch.zeros(3, device=device, requires_grad=True)
+        para_velocity = torch.nn.Parameter(model_output.clone().to(device).detach())  # same shape as model_output
+
+        if not hasattr(self, "_guidance_pose_params"):
+            self._guidance_pose_params = {
+                "rotvec": torch.nn.Parameter(torch.zeros(3, device=device)),
+                "scale": torch.nn.Parameter(torch.ones(3, device=device)),
+                "translation": torch.nn.Parameter(torch.zeros(3, device=device)),
+            }
+            self._guidance_pose_params_initialized_at_step = self._step_index
+
+        rotvec = self._guidance_pose_params["rotvec"]
+        scale = self._guidance_pose_params["scale"]
+        translation = self._guidance_pose_params["translation"]
 
         optimizer = torch.optim.Adam([
             {'params': [para_velocity], 'lr': lr_velocity},
@@ -429,10 +438,11 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         ])
 
         # === Load reference images ===
-        ref_dir = config.get("reference_dir", "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1")
+        ref_dir = config.get("reference_dir", "/home/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_depth/325_cropped_hoi_1")
         
         ref_normal = cv.imread(f"{ref_dir}/rendered_normal.png", cv.IMREAD_COLOR)
         ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        ref_normal = ref_normal * 2.0 - 1.0          # 映射回 [-1,1]
         ref_normal = torch.from_numpy(ref_normal).to(device)
 
         ref_disparity = cv.imread(f"{ref_dir}/rendered_disparity.png", cv.IMREAD_GRAYSCALE)
@@ -447,14 +457,17 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         if self._step_index == 9:
             num_steps = 100
             lr_velocity = 1e-4
-            lr_scale = 0.005
-            lr_rotation = 0.01
-            lr_translation = 0.005
+            lr_scale = 0.0005
+            lr_rotation = 0.005
+            lr_translation = 0.0001
+
         # === Optimization Loop ===
         for step in range(num_steps):
             optimizer.zero_grad()
 
             transform = self.build_transform_matrix_axis_angle(scale, rotvec, translation)
+
+            # compute clean estimate x1 using para_velocity
             x1 = sample + (1.0 - sigma) * para_velocity
 
             with torch.cuda.amp.autocast(enabled=False):
@@ -483,53 +496,60 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             vertices_homo = (vertices_homo @ To.T)  @ transform.T
             vertices_transformed = vertices_homo[:, :3] / vertices_homo[:, 3:4]
 
-            if step % 5 == 0:
-                with torch.no_grad():
-                    import os
-                    debug_dir = "./debug_2d_guidance"
-                    if not os.path.exists(debug_dir):
-                        os.makedirs(debug_dir, exist_ok=True)
-                    v_vis = vertices_transformed.detach().cpu().numpy()
-                    f_vis = faces.detach().cpu().numpy()
-                    # 如果你的渲染器是逆时针为正，且画面全黑，试试反转：
-                    f_vis = np.ascontiguousarray(f_vis)[:, ::-1]
-                    v_vis = v_vis.astype(np.float32)
-                    trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
+            # if step % 5 == 0:
+            #     with torch.no_grad():
+            #         import os
+            #         debug_dir = "./debug_2d_guidance"
+            #         if not os.path.exists(debug_dir):
+            #             os.makedirs(debug_dir, exist_ok=True)
+            #         v_vis = vertices_transformed.detach().cpu().numpy()
+            #         f_vis = faces.detach().cpu().numpy()
+            #         # 如果你的渲染器是逆时针为正，且画面全黑，试试反转：
+            #         f_vis = np.ascontiguousarray(f_vis)[:, ::-1]
+            #         v_vis = v_vis.astype(np.float32)
+            #         trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
 
             # Render
             render_out = self.renderer.render_normals_disparity_silhouette(
                 verts_cam=vertices_transformed, faces=faces, Kp=Kp, H=height, W=width
             )
 
-            normal_map = render_out["normal_rgb"]
+            normal_map = render_out["normal_cam"] # 不应该用rgb，应该用单位化的法线也就是 [-1,1] 范围
             alpha_map = render_out["silhouette"][..., 0]
             disp_map = render_out["disparity"][..., 0]                # 
 
             # === Compute Losses ===
-            loss_norm = F.l1_loss(normal_map, ref_normal)
+            # loss_norm = F.l1_loss(normal_map, ref_normal)
+            loss_norm = self.loss_norm(normal_map.permute(2,0,1).unsqueeze(0), ref_normal.permute(2,0,1).unsqueeze(0))
             loss_disp = F.l1_loss(disp_map, ref_disparity)
             loss_sil = F.binary_cross_entropy(alpha_map, ref_silhouette)
 
             # === Rotation regularization ===
-            loss_reg_rot = weight_reg_rot * torch.sum(rotvec ** 2)
+            loss_reg_rot = torch.sum(rotvec ** 2)
+            loss_reg_scale = torch.sum((scale - 1) ** 2)
+            loss_reg_trans = torch.sum(translation ** 2)
 
             loss = (
                     weight_norm * loss_norm
                     + weight_sil * loss_sil
                     + weight_disp * loss_disp
-                    + weight_reg_scale * torch.sum((scale - 1)**2)
-                    + weight_reg_trans * torch.sum(translation**2)
-                    + loss_reg_rot
+                    + weight_reg_scale * loss_reg_scale
+                    + weight_reg_trans * loss_reg_trans
+                    + weight_reg_rot * loss_reg_rot
                 )
             
             # === Backprop ===
             loss.backward()
+
+            # Per-group grad clipping (different clips for para_velocity vs pose params)
             for group in optimizer.param_groups:
-                if group["params"][0] is para_velocity:
+                params = group['params']
+                # choose clip by matching to para_velocity specifically
+                if any(p is para_velocity for p in params):
                     clip = 1.0
                 else:
                     clip = 0.1
-                torch.nn.utils.clip_grad_norm_(group["params"], max_norm=clip)
+                torch.nn.utils.clip_grad_norm_(params, max_norm=clip)
 
             optimizer.step()
 
@@ -539,10 +559,13 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                     f"L_norm={loss_norm.item():.4f}, "
                     f"L_disp={loss_disp.item():.4f}, "
                     f"L_sil={loss_sil.item():.4f}, "
+                    f"L_reg_scale={loss_reg_scale.item():.4f}, "
+                    f"L_reg_trans={loss_reg_trans.item():.4f}, "
+                    f"L_reg_rot={loss_reg_rot.item():.4f}, "
                     f"Total={loss.item():.4f}"
                 )
 
-            if step % 5 == 0:
+            if step % 10 == 0:
                 import os
                 debug_dir = "./debug_2d_guidance"
                 if not os.path.exists(debug_dir):
@@ -602,6 +625,27 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         else:
             arr = (arr * 255).astype(np.uint8)
             cv.imwrite(path, cv.cvtColor(arr, cv.COLOR_RGB2BGR))
+
+    def loss_norm(self, pred_normal, gt_normal, mask=None, eps=1e-6):
+        # --- Normalize both predicted and GT normals ---
+        pred = F.normalize(pred_normal, dim=1, eps=eps)
+        gt = F.normalize(gt_normal, dim=1, eps=eps)
+
+        # --- Dot product for normal alignment ---
+        dot = torch.sum(pred * gt, dim=1, keepdim=True)  # [B,1,H,W]
+
+        # Clamp to avoid invalid values (optional safety)
+        dot = dot.clamp(-1.0, 1.0)
+
+        # loss = 1 - cos similarity
+        loss_map = 1.0 - dot
+
+        # Apply mask if provided
+        if mask is not None:
+            loss_map = loss_map * mask
+            return loss_map.sum() / (mask.sum() + eps)
+        else:
+            return loss_map.mean()
 
 
 @dataclass

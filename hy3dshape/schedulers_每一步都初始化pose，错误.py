@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
+from sympy import group
 import torch
 import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
@@ -45,6 +46,10 @@ try:
     NVDIFFRAST_AVAILABLE = True
 except ImportError:
     NVDIFFRAST_AVAILABLE = False
+
+
+from .diff_render import DifferentiableRenderer
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -108,14 +113,23 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         self.sigma_min = self.sigmas[-1].item()
         self.sigma_max = self.sigmas[0].item()
         
-        # Initialize GL context for 2D guidance (lazy initialization)
-        self.glctx = None
+    #     # Initialize GL context for 2D guidance (lazy initialization)
+    #     self.glctx = None
 
-    def _init_glctx(self):
-        """Lazy initialization of GL context."""
-        if self.glctx is None and NVDIFFRAST_AVAILABLE:
-            self.glctx = dr.RasterizeGLContext()
-        return self.glctx
+    # def _init_glctx(self):
+    #     """Lazy initialization of GL context."""
+    #     if self.glctx is None and NVDIFFRAST_AVAILABLE:
+    #         self.glctx = dr.RasterizeGLContext()
+    #     return self.glctx
+
+        # initialize renderer for 2D guidance
+        self.renderer = None
+
+        def _init_renderer(self):
+            """Lazy initialization of differentiable renderer."""
+            if self.renderer is None and NVDIFFRAST_AVAILABLE:
+                self.renderer = DifferentiableRenderer()
+            return self.renderer
 
     @property
     def step_index(self):
@@ -353,73 +367,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         )
 
     # ============== 2D GUIDANCE METHODS ==============
-
-    def _skew_symmetric(self, v: torch.Tensor) -> torch.Tensor:
-        """Create skew-symmetric matrix from 3D vector."""
-        return torch.tensor([
-            [0, -v[2], v[1]],
-            [v[2], 0, -v[0]],
-            [-v[1], v[0], 0]
-        ], device=v.device, dtype=v.dtype)
-
-    def axis_angle_to_matrix(self, axis_angle: torch.Tensor) -> torch.Tensor:
-        """
-        Convert axis-angle representation to rotation matrix (differentiable).
-        
-        Args:
-            axis_angle: (3,) tensor representing rotation as axis * angle
-        
-        Returns:
-            rotation_matrix: (3, 3) orthogonal rotation matrix
-        """
-        angle = torch.norm(axis_angle)
-        
-        # Handle small angles with Taylor expansion to avoid division by zero
-        if angle < 1e-6:
-            # R ≈ I + [axis_angle]_×
-            return torch.eye(3, device=axis_angle.device) + self._skew_symmetric(axis_angle)
-        
-        axis = axis_angle / angle
-        K = self._skew_symmetric(axis)
-        
-        # Rodrigues' formula: R = I + sin(θ)K + (1-cos(θ))K²
-        cos_angle = torch.cos(angle)
-        sin_angle = torch.sin(angle)
-        
-        I = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype)
-        R = I + sin_angle * K + (1 - cos_angle) * (K @ K)
-        
-        return R
-    
-    def _build_transform_matrix(
-        self, 
-        scale: torch.Tensor, 
-        axis_angle: torch.Tensor, 
-        translation: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Build 4x4 transformation matrix with proper rotation parameterization.
-        
-        Args:
-            scale: (3,) scale factors
-            axis_angle: (3,) rotation in axis-angle form
-            translation: (3,) translation vector
-        """
-        device = scale.device
-        transform = torch.eye(4, device=device, dtype=torch.float32)
-        
-        # Convert axis-angle to rotation matrix
-        R = self.axis_angle_to_matrix(axis_angle)
-        
-        # Apply scale then rotation: SR
-        S = torch.diag(scale)
-        SR = S @ R
-        
-        transform[:3, :3] = SR
-        transform[:3, 3] = translation
-        
-        return transform
-
     @torch.enable_grad()
     def _apply_2d_guidance(
         self,
@@ -427,268 +374,279 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         sample: torch.FloatTensor,
         sigma: float,
         To: torch.Tensor,
-        _export: Callable,
+        _export: callable,
         device: torch.device,
         original_dtype: torch.dtype,
         config: dict,
     ) -> torch.FloatTensor:
         """
-        Apply differentiable 2D guidance to refine model output.
+        Apply differentiable 2D guidance with quaternion-based transformation + disparity supervision.
         """
-        
-        # === Freeze VAE & Decoder ===
+
+        # === Freeze decoder ===
         pipeline = getattr(_export, "__self__", None)
         if pipeline is not None:
             for m in [pipeline.vae, getattr(pipeline.vae, "geo_decoder", None)]:
                 if m is not None:
                     for p in m.parameters():
                         p.requires_grad_(False)
-        
+
         # === Hyperparameters ===
-        num_steps = config.get("num_steps", 5)
-        lr_velocity = config.get("lr_velocity", 1e-4)
-        lr_scale = config.get("lr_scale", 0.01)
-        lr_rotation = config.get("lr_rotation", 0.01)
-        lr_translation = config.get("lr_translation", 0.01)
-        
+        num_steps = config.get("num_steps", 50)
+        lr_velocity = config.get("lr_velocity", 1e-2)
+        lr_scale = config.get("lr_scale", 1e-4)
+        lr_rotation = config.get("lr_rotation", 5e-4)
+        lr_translation = config.get("lr_translation", 5e-4 )
+
         weight_norm = config.get("weight_norm", 10.0)
         weight_sil = config.get("weight_sil", 10.0)
-        weight_reg_scale = config.get("weight_reg_scale", 1e-3)
-        weight_reg_trans = config.get("weight_reg_trans", 1e-3)
-        weight_reg_rot = config.get("weight_reg_rot", 1e-4)
-        
-        fov_x = config.get("fov_x", 41.039776)
-        fov_y = config.get("fov_y", 41.039776)
-        
-        # === Initialize Optimizable Parameters ===
-        para_velocity = model_output.clone().detach().requires_grad_(True)
-        axis_angle = torch.zeros(3, device=device, dtype=torch.float32, requires_grad=True)
-        scale = torch.ones(3, device=device, dtype=torch.float32, requires_grad=True)
-        translation = torch.zeros(3, device=device, dtype=torch.float32, requires_grad=True)
-        
+        weight_disp = config.get("weight_disp", 10.0)        
+        weight_reg_scale = config.get("weight_reg_scale", 1e-5)
+        weight_reg_trans = config.get("weight_reg_trans", 1e-5)
+        weight_reg_rot = config.get("weight_reg_rot", 1e-5)
+
+        fov_x = config.get("fov_x", 41.04)
+        width = config.get("width", 224)
+        height = config.get("height", 224)
+
+        # === Initialize renderer ===
+        if not hasattr(self, "renderer") or self.renderer is None:
+            self.renderer = DifferentiableRenderer(device=device)
+
+        Kp = self.renderer.fov_to_K_normalized(fov_x, width, height)
+
+        # === Optimizable Parameters ===
+        para_velocity = torch.nn.Parameter(model_output.clone().to(device).detach())  # same shape as model_output
+
+        if not hasattr(self, "_guidance_pose_params"):
+            self._guidance_pose_params = {
+                "rotvec": torch.nn.Parameter(torch.zeros(3, device=device)),
+                "scale": torch.nn.Parameter(torch.ones(3, device=device)),
+                "translation": torch.nn.Parameter(torch.zeros(3, device=device)),
+            }
+            self._guidance_pose_params_initialized_at_step = self._step_index
+
+        rotvec = self._guidance_pose_params["rotvec"]
+        scale = self._guidance_pose_params["scale"]
+        translation = self._guidance_pose_params["translation"]
+
         optimizer = torch.optim.Adam([
             {'params': [para_velocity], 'lr': lr_velocity},
             {'params': [scale], 'lr': lr_scale},
-            {'params': [axis_angle], 'lr': lr_rotation},
+            {'params': [rotvec], 'lr': lr_rotation},
             {'params': [translation], 'lr': lr_translation},
         ])
-        
-        # === Load Reference Images ===
-        # ref_dir = config.get("reference_dir", "./references")
-        ref_dir = "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1"
+
+        # === Load reference images ===
+        ref_dir = config.get("reference_dir", "/home/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_depth/325_cropped_hoi_1")
         
         ref_normal = cv.imread(f"{ref_dir}/rendered_normal.png", cv.IMREAD_COLOR)
-        if ref_normal is None:
-            raise FileNotFoundError(f"Could not load {ref_dir}/rendered_normal.png")
         ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        ref_normal = ref_normal * 2.0 - 1.0          # 映射回 [-1,1]
         ref_normal = torch.from_numpy(ref_normal).to(device)
-        
+
+        ref_disparity = cv.imread(f"{ref_dir}/rendered_disparity.png", cv.IMREAD_GRAYSCALE)
+        ref_disparity = ref_disparity.astype(np.float32) / 255.0
+        ref_disparity = torch.from_numpy(ref_disparity).to(device)
+
         ref_silhouette = cv.imread(f"{ref_dir}/rendered_silhouette.png", cv.IMREAD_GRAYSCALE)
-        if ref_silhouette is None:
-            raise FileNotFoundError(f"Could not load {ref_dir}/rendered_silhouette.png")
         ref_silhouette = ref_silhouette.astype(np.float32) / 255.0
         ref_silhouette = torch.from_numpy(ref_silhouette).to(device)
-        
+
+
+        if self._step_index == 9:
+            num_steps = 100
+            lr_velocity = 1e-4
+            lr_scale = 0.0005
+            lr_rotation = 0.005
+            lr_translation = 0.0001
+
         # === Optimization Loop ===
-        for opt_step in range(num_steps):
+        for step in range(num_steps):
             optimizer.zero_grad()
-            
-            transform = self._build_transform_matrix(scale, axis_angle, translation)
+
+            transform = self.build_transform_matrix_axis_angle(scale, rotvec, translation)
+
+            # compute clean estimate x1 using para_velocity
             x1 = sample + (1.0 - sigma) * para_velocity
-            
+
             with torch.cuda.amp.autocast(enabled=False):
                 outputs = _export(
                     x1.to(original_dtype),
                     output_type="mesh",
-                    requires_grad=True,
-                    use_checkpoint=True,
+                    mc_algo="dmc",
                     enable_pbar=False,
-                    mc_algo="dmc"
-                )  # 利用dmc导出可微的mesh
+                    requires_grad=True,
+                    use_checkpoint=True
+                )
 
             vertices, faces = outputs[0]
-            # ---- Sanity Check ----
-            if faces is None or len(faces) == 0 or faces.numel() == 0:
-                assert False, f"[Warning] Empty mesh at opt_step {opt_step}, skip rendering."
+            vertices = torch.as_tensor(vertices, device=device, dtype=torch.float32)
+            faces = torch.as_tensor(faces, device=device, dtype=torch.int32)
 
-            if faces.dim() == 3 and faces.shape[0] == 1:
-                faces = faces.squeeze(0)
-            faces = faces.to(torch.int32).contiguous()
+            # Apply transformation, 利用To转化到pointsmap坐标系, 再利用transform做posed
+            # ensure To is a tensor on the correct device/dtype
+            if not isinstance(To, torch.Tensor):
+                To = torch.as_tensor(To, device=device, dtype=torch.float32)
 
-            # if True:
+            # build homogeneous vertices
+            vertices_homo = torch.cat([vertices, torch.ones(vertices.shape[0], 1, device=device, dtype=vertices.dtype)], dim=1)
+
+            # clearer explicit order: first To, then transform
+            vertices_homo = (vertices_homo @ To.T)  @ transform.T
+            vertices_transformed = vertices_homo[:, :3] / vertices_homo[:, 3:4]
+
+            # if step % 5 == 0:
             #     with torch.no_grad():
-            #         v_vis = vertices.detach().cpu().numpy()
+            #         import os
+            #         debug_dir = "./debug_2d_guidance"
+            #         if not os.path.exists(debug_dir):
+            #             os.makedirs(debug_dir, exist_ok=True)
+            #         v_vis = vertices_transformed.detach().cpu().numpy()
             #         f_vis = faces.detach().cpu().numpy()
             #         # 如果你的渲染器是逆时针为正，且画面全黑，试试反转：
             #         f_vis = np.ascontiguousarray(f_vis)[:, ::-1]
             #         v_vis = v_vis.astype(np.float32)
-            #         trimesh.Trimesh(v_vis, f_vis).export(f"./debug/mesh_{opt_step:03d}.glb")
-            
+            #         trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
 
-            vertices = torch.as_tensor(vertices, device=device, dtype=torch.float32)
-            faces = torch.as_tensor(faces, device=device, dtype=torch.int32)
-            
-            # Apply transformations, 将mesh变到Moge的pointmap相机坐标系下
-            vertices_homo = torch.cat([
-                vertices, 
-                torch.ones(vertices.shape[0], 1, device=device)
-            ], dim=1)
-            vertices_homo = vertices_homo @ transform.T
-            
-            if not isinstance(To, torch.Tensor):
-                To = torch.as_tensor(To, device=device, dtype=torch.float32)
-            vertices_homo = vertices_homo @ To.T
-            vertices_transformed = vertices_homo[:, :3] / vertices_homo[:, 3:4]
-            
             # Render
-            normal_map, alpha_map, silhouette = self.render_maps(
-                verts=vertices_transformed,
-                faces=faces,
-                fov_x=fov_x,
-                fov_y=fov_y
-            )  # 可视化发现这里渲染得到的normal， silhouette是全黑，需要debug
-            
-            # === Compute Losses ===
-            loss_norm = F.l1_loss(normal_map, ref_normal)
-            loss_sil = F.binary_cross_entropy(alpha_map, ref_silhouette, reduction='mean')
-            loss_scale = torch.sum((scale - 1.0) ** 2)
-            loss_trans = torch.sum(translation ** 2)
-            loss_rot = torch.sum(axis_angle ** 2)
-            
-            total_loss = (
-                weight_norm * loss_norm +
-                weight_sil * loss_sil +
-                weight_reg_scale * loss_scale +
-                weight_reg_trans * loss_trans +
-                weight_reg_rot * loss_rot
+            render_out = self.renderer.render_normals_disparity_silhouette(
+                verts_cam=vertices_transformed, faces=faces, Kp=Kp, H=height, W=width
             )
+
+            normal_map = render_out["normal_cam"] # 不应该用rgb，应该用单位化的法线也就是 [-1,1] 范围
+            alpha_map = render_out["silhouette"][..., 0]
+            disp_map = render_out["disparity"][..., 0]                # 
+
+            # === Compute Losses ===
+            # loss_norm = F.l1_loss(normal_map, ref_normal)
+            loss_norm = self.loss_norm(normal_map.permute(2,0,1).unsqueeze(0), ref_normal.permute(2,0,1).unsqueeze(0))
+            loss_disp = F.l1_loss(disp_map, ref_disparity)
+            loss_sil = F.binary_cross_entropy(alpha_map, ref_silhouette)
+
+            # === Rotation regularization ===
+            loss_reg_rot = torch.sum(rotvec ** 2)
+            loss_reg_scale = torch.sum((scale - 1) ** 2)
+            loss_reg_trans = torch.sum(translation ** 2)
+
+            loss = (
+                    weight_norm * loss_norm
+                    + weight_sil * loss_sil
+                    + weight_disp * loss_disp
+                    + weight_reg_scale * loss_reg_scale
+                    + weight_reg_trans * loss_reg_trans
+                    + weight_reg_rot * loss_reg_rot
+                )
             
-            total_loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_([para_velocity], max_norm=1.0)
-            torch.nn.utils.clip_grad_norm_([scale, axis_angle, translation], max_norm=0.1)
-            
+            # === Backprop ===
+            loss.backward()
+
+            # Per-group grad clipping (different clips for para_velocity vs pose params)
+            for group in optimizer.param_groups:
+                params = group['params']
+                # choose clip by matching to para_velocity specifically
+                if any(p is para_velocity for p in params):
+                    clip = 1.0
+                else:
+                    clip = 0.1
+                torch.nn.utils.clip_grad_norm_(params, max_norm=clip)
+
             optimizer.step()
-            
-            if opt_step % 5 == 0:
+
+            if step % 5 == 0:
                 print(
-                    f"[2D Guidance {opt_step:3d}] "
-                    f"L_norm={loss_norm.item():.4f} "
-                    f"L_sil={loss_sil.item():.4f} | "
-                    f"Total={total_loss.item():.4f}"
+                    f"[Step {step:03d}] "
+                    f"L_norm={loss_norm.item():.4f}, "
+                    f"L_disp={loss_disp.item():.4f}, "
+                    f"L_sil={loss_sil.item():.4f}, "
+                    f"L_reg_scale={loss_reg_scale.item():.4f}, "
+                    f"L_reg_trans={loss_reg_trans.item():.4f}, "
+                    f"L_reg_rot={loss_reg_rot.item():.4f}, "
+                    f"Total={loss.item():.4f}"
                 )
-            
-            if opt_step % 10 == 0 and config.get("save_debug", False):
+
+            if step % 10 == 0:
                 import os
-                os.makedirs("./debug", exist_ok=True)
-                
-                normal_np = (normal_map.detach().cpu().numpy() * 255).astype(np.uint8)
-                cv.imwrite(
-                    f"./debug/opt_step_{opt_step:03d}_normal.png", 
-                    cv.cvtColor(normal_np, cv.COLOR_RGB2BGR)
-                )
-                
-                sil_np = (silhouette.detach().cpu().numpy() * 255).astype(np.uint8)
-                cv.imwrite(f"./debug/opt_step_{opt_step:03d}_silhouette.png", sil_np)
+                debug_dir = "./debug_2d_guidance"
+                if not os.path.exists(debug_dir):
+                    os.makedirs(debug_dir, exist_ok=True)
+                self.save_debug_image(normal_map, f"{debug_dir}/normal_timestep{self._step_index}_opt{step:03d}.png")
+                self.save_debug_image(alpha_map, f"{debug_dir}/silhouette_timestep{self._step_index}_opt{step:03d}.png")
+                self.save_debug_image(disp_map, f"{debug_dir}/disp_timestep{self._step_index}_opt{step:03d}.png", normalize=True)
+
 
         return para_velocity.detach()
+        
+    def build_transform_matrix_axis_angle(self, scale, rotvec, translation):
+        """
+        Build a 4×4 transform matrix using:
+        - scale: (3,)
+        - rotvec: (3,) axis-angle vector (Rodrigues)
+        - translation: (3,)
+        """
+        angle = torch.linalg.norm(rotvec)
+        if angle < 1e-8:
+            R = torch.eye(3, device=rotvec.device)
+        else:
+            axis = rotvec / angle
+
+            # skew-symmetric matrix for Rodrigues
+            K = torch.tensor([
+                [0, -axis[2], axis[1]],
+                [axis[2], 0, -axis[0]],
+                [-axis[1], axis[0], 0]
+            ], device=rotvec.device)
+
+            R = (
+                torch.eye(3, device=rotvec.device)
+                + torch.sin(angle) * K
+                + (1 - torch.cos(angle)) * (K @ K)
+            )
+
+        # scale matrix
+        S = torch.diag(scale)
+
+        # S @ R composition
+        transform = torch.eye(4, device=scale.device)
+        transform[:3, :3] = S @ R
+        transform[:3, 3] = translation
+
+        return transform
     
-    def render_maps(
-        self,
-        verts: torch.Tensor,
-        faces: torch.Tensor,
-        fov_x: float,
-        fov_y: float,
-        render_res: Tuple[int, int] = (224, 224),
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Render normal map, alpha map, and silhouette."""
-        device = verts.device
-        
-        verts = verts.unsqueeze(0)
-        faces = faces.unsqueeze(0)
-        
-        W, H = render_res
-        fx = W / (2 * np.tan(np.deg2rad(fov_x) / 2))
-        fy = H / (2 * np.tan(np.deg2rad(fov_y) / 2))
-        cx, cy = W / 2, H / 2
-        
-        projection = torch.tensor([
-            [fx, 0, cx, 0],
-            [0, fy, cy, 0],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
-        ], device=device, dtype=torch.float32)
-        
-        c2ws = torch.eye(4, device=device, dtype=torch.float32)
-        
-        normals = self._compute_vertex_normals(verts[0], faces[0]).unsqueeze(0)
-        normal_colors = ((normals + 1.0) / 2.0).clamp(0, 1)
-        alpha = torch.ones_like(normal_colors[..., :1])
-        rgba = torch.cat([normal_colors, alpha], dim=-1)
-        
-        normal_map, alpha_map = self._renderer(
-            verts, faces[0], rgba[0], projection, c2ws, (H, W)
-        )   # 渲染
-        
-        silhouette = (alpha_map > 0.5).float()
-        
-        return normal_map.clamp(0, 1), alpha_map.clamp(0, 1), silhouette
-    
-    def _renderer(
-        self, 
-        verts: torch.Tensor,  # [1, V, 3]，在 MOGE 相机坐标系中
-        tri: torch.Tensor,    # [F, 3]
-        attr: torch.Tensor,   # [1, V, C]
-        projection: torch.Tensor,  # K 矩阵扩展成 4x4
-        c2ws: torch.Tensor,        # 相机外参（=I）
-        resolution: Tuple[int, int]
-    ):
-        device = verts.device
 
-        if self.glctx is None:
-            self._init_glctx()
+    def save_debug_image(self,tensor, path, normalize=False):
+        arr = tensor.detach().cpu().numpy()
+        if normalize:
+            arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
 
-        tri = tri.to(torch.int32).contiguous()
-        verts = verts.to(torch.float32).contiguous()
-        attr = attr.to(torch.float32).contiguous()
+        if arr.ndim == 2:
+            arr = (arr * 255).astype(np.uint8)
+            cv.imwrite(path, arr)
+        else:
+            arr = (arr * 255).astype(np.uint8)
+            cv.imwrite(path, cv.cvtColor(arr, cv.COLOR_RGB2BGR))
 
-        ones = torch.ones(verts.shape[0], verts.shape[1], 1, device=device)
-        pos = torch.cat((verts, ones), dim=2)  # [1, V, 4]
+    def loss_norm(self, pred_normal, gt_normal, mask=None, eps=1e-6):
+        # --- Normalize both predicted and GT normals ---
+        pred = F.normalize(pred_normal, dim=1, eps=eps)
+        gt = F.normalize(gt_normal, dim=1, eps=eps)
 
-        # 这里的 c2ws 是单位矩阵（因为 verts 已经在相机坐标系中）
-        view_matrix = torch.linalg.inv(c2ws)
-        mat = (projection @ view_matrix).unsqueeze(0)
-        pos_clip = (pos @ mat.mT).contiguous()
+        # --- Dot product for normal alignment ---
+        dot = torch.sum(pred * gt, dim=1, keepdim=True)  # [B,1,H,W]
 
-        rast, _ = dr.rasterize(self.glctx, pos_clip, tri, resolution)
-        out, _ = dr.interpolate(attr, rast, tri)
-        out = dr.antialias(out, rast, pos_clip, tri)
+        # Clamp to avoid invalid values (optional safety)
+        dot = dot.clamp(-1.0, 1.0)
 
-        img = torch.flip(out[0, :, :, :3], dims=[0])
-        alpha = torch.flip(out[0, :, :, 3], dims=[0])
-        return img, alpha
+        # loss = 1 - cos similarity
+        loss_map = 1.0 - dot
 
-    
-    def _compute_vertex_normals(
-        self, 
-        verts: torch.Tensor, 
-        faces: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute smooth vertex normals from face normals."""
-        v0 = verts[faces[:, 0]]
-        v1 = verts[faces[:, 1]]
-        v2 = verts[faces[:, 2]]
-        
-        face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)
-        face_normals = F.normalize(face_normals, dim=1)
-        
-        vertex_normals = torch.zeros_like(verts)
-        vertex_normals.index_add_(0, faces[:, 0], face_normals)
-        vertex_normals.index_add_(0, faces[:, 1], face_normals)
-        vertex_normals.index_add_(0, faces[:, 2], face_normals)
-        
-        return F.normalize(vertex_normals, dim=1)
+        # Apply mask if provided
+        if mask is not None:
+            loss_map = loss_map * mask
+            return loss_map.sum() / (mask.sum() + eps)
+        else:
+            return loss_map.mean()
+
 
 @dataclass
 class UniInvEulerSchedulerOutput(BaseOutput):

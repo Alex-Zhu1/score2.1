@@ -23,14 +23,24 @@ vae = ShapeVAE.from_pretrained(
     'tencent/Hunyuan3D-2.1',
     use_safetensors=False,
     variant='fp16',
+    # pc_size=81920,
+    # pc_sharpedge_size=81920,
 )
 
+# vae.enable_flashvdm_decoder(
+#     enabled=True,
+#     adaptive_kv_selection=True,
+#     topk_mode='mean',
+#     mc_algo='dmc'
+# )
 
 loader = SharpEdgeSurfaceLoader(
     num_sharp_points=0,
     num_uniform_points=81920,
 )
-mesh_demo = 'demos/demo.glb'
+mesh_demo = "/home/haiming.zhu/HOI/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj"
+# mesh_demo = "/home/haiming.zhu/HOI/score2.1/hunyuan_registered.glb"
+# mesh_demo = "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj"
 surface = loader(mesh_demo).to('cuda', dtype=torch.float16)
 print(surface.shape)
 
@@ -43,7 +53,7 @@ mesh = vae.latents2mesh(
     mc_level=0.0,
     num_chunks=20000,
     octree_resolution=256,
-    mc_algo='mc',
+    mc_algo='dmc',
     enable_pbar=True
 )
 

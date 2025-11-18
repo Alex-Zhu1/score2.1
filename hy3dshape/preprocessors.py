@@ -27,6 +27,101 @@ def array_to_tensor(np_array):
     return image_pts
 
 
+class ImageProcessorV211:
+    def __init__(self, size=512, border_ratio=None):
+        self.size = size
+        self.border_ratio = border_ratio
+
+    @staticmethod
+    def recenter(image, border_ratio: float = 0.2, ref_bbox=None, ref_scale=None):
+        # ---- ensure RGBA ----
+        if image.shape[-1] == 4:
+            mask = image[..., 3]
+        else:
+            mask = np.ones_like(image[..., 0:1]) * 255
+            image = np.concatenate([image, mask], axis=-1)
+            mask = mask[..., 0]
+
+        H, W, C = image.shape
+        size = max(H, W)
+        result = np.zeros((size, size, C), dtype=np.uint8)
+
+        # ---- if reference bbox/scale provided, use them directly ----
+        if ref_bbox is not None and ref_scale is not None:
+            x_min, x_max, y_min, y_max = ref_bbox
+            scale = ref_scale
+
+            # clip to image boundaries
+            x_min = max(0, min(H - 1, int(round(x_min))))
+            x_max = max(1, min(H, int(round(x_max))))
+            y_min = max(0, min(W - 1, int(round(y_min))))
+            y_max = max(1, min(W, int(round(y_max))))
+        else:
+            # ---- compute bbox & scale from mask ----
+            coords = np.nonzero(mask)
+            x_min, x_max = coords[0].min(), coords[0].max()
+            y_min, y_max = coords[1].min(), coords[1].max()
+            h = x_max - x_min
+            w = y_max - y_min
+            if h == 0 or w == 0:
+                raise ValueError('input image is empty')
+            desired_size = int(size * (1 - border_ratio))
+            scale = desired_size / max(h, w)
+
+        # ---- resize and recenter ----
+        h = x_max - x_min
+        w = y_max - y_min
+        h2 = int(h * scale)
+        w2 = int(w * scale)
+        x2_min = (size - h2) // 2
+        x2_max = x2_min + h2
+        y2_min = (size - w2) // 2
+        y2_max = y2_min + w2
+
+        result[x2_min:x2_max, y2_min:y2_max] = cv2.resize(
+            image[x_min:x_max, y_min:y_max], (w2, h2), interpolation=cv2.INTER_AREA
+        )
+
+        bg = np.ones((result.shape[0], result.shape[1], 3), dtype=np.uint8) * 255
+        mask = result[..., 3:].astype(np.float32) / 255
+        result = result[..., :3] * mask + bg * (1 - mask)
+
+        mask = mask * 255
+        result = result.clip(0, 255).astype(np.uint8)
+        mask = mask.clip(0, 255).astype(np.uint8)
+        return result, mask, (x_min, x_max, y_min, y_max), scale
+
+    def load_image(self, image, border_ratio=0.15, ref_bbox=None, ref_scale=None, to_tensor=True):
+        if isinstance(image, str):
+            image = cv2.imread(image, cv2.IMREAD_UNCHANGED)
+            image, mask, ref_bbox, ref_scale = self.recenter(image, border_ratio=border_ratio, ref_bbox=ref_bbox, ref_scale=ref_scale)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        elif isinstance(image, Image.Image):
+            image = image.convert("RGBA")
+            image = np.asarray(image)
+            image, mask, ref_bbox, ref_scale = self.recenter(image, border_ratio=border_ratio, ref_bbox=ref_bbox, ref_scale=ref_scale)
+
+        image = cv2.resize(image, (self.size, self.size), interpolation=cv2.INTER_CUBIC)
+        mask = cv2.resize(mask, (self.size, self.size), interpolation=cv2.INTER_NEAREST)
+        mask = mask[..., np.newaxis]
+
+        if to_tensor:
+            image = array_to_tensor(image)
+            mask = array_to_tensor(mask)
+        return image, mask, ref_bbox, ref_scale
+
+    def __call__(self, image, border_ratio=0.15, ref_bbox=None, ref_scale=None, to_tensor=True, **kwargs):
+        if self.border_ratio is not None:
+            border_ratio = self.border_ratio
+        image, mask, ref_bbox, ref_scale = self.load_image(image, border_ratio=border_ratio, ref_bbox=ref_bbox, ref_scale=ref_scale, to_tensor=to_tensor)
+        outputs = {
+            'image': image,
+            'mask': mask
+        }
+        return outputs, ref_bbox, ref_scale
+
+
+
 class ImageProcessorV2:
     def __init__(self, size=512, border_ratio=None):
         self.size = size

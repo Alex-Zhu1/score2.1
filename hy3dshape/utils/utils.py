@@ -94,7 +94,7 @@ def smart_load_model(
 ):
     original_model_path = model_path
     # try local path
-    base_dir = os.environ.get('HY3DGEN_MODELS', '~/.cache/hy3dgen')
+    base_dir = os.environ.get('HY3DGEN_MODELS', '/mnt/data/haiming/hy3dgen')
     model_fld = os.path.expanduser(os.path.join(base_dir, model_path))
     model_path = os.path.expanduser(os.path.join(base_dir, model_path, subfolder))
     logger.info(f'Try to load model from local path: {model_path}')
