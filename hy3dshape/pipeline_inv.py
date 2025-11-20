@@ -133,6 +133,7 @@ class HunyuanInversion:
         self.device = pipeline.device
         self.dtype = pipeline.dtype
         self.image_processor = pipeline.image_processor
+        self.set_surface_extractor = pipeline.set_surface_extractor
 
         # inversion 专用 scheduler
         self.inv_scheduler = UniInvEulerScheduler(num_train_timesteps=1000)
@@ -223,15 +224,16 @@ class HunyuanInversion:
 
         if inversion:
             # mesh_path = '/home/haiming.zhu/HOI/score2.1/hunyuan_registered.glb'
-            surface = loader(mesh_path, Th, To).to(self.device, dtype=self.dtype)
+            surface = loader(mesh_path, Th, To).to(self.device, dtype=self.dtype)   # 这里hand mesh被配准到hunyuan生成的mesh空间
             # surface = loader(mesh_path).to(self.device, dtype=self.dtype)
             latents = self.vae.encode(surface)
             latents = self.vae.scale_factor * latents
 
             # test decode
-            vis_test_decoding = False
+            vis_test_decoding = True
             if vis_test_decoding:
                 import time
+                self.set_surface_extractor(mc_algo)
                 latents_rec = 1. / self.vae.scale_factor * latents.clone().detach()
                 latents_rec = self.vae(latents_rec)
                 outputs = self.vae.latents2mesh(
@@ -246,7 +248,7 @@ class HunyuanInversion:
                 mesh = export_to_trimesh(outputs)
                 if isinstance(mesh, list):
                     for mid, m in enumerate(mesh):
-                        m.export(f"check_hand_{mid}_{time.time()}.glb")
+                        m.export(f"check_hand_flexicube_{mid}_{time.time()}.glb")
                 else:
                     mesh.export(f"check_hand_{time.time()}.glb")
 

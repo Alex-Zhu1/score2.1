@@ -290,23 +290,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         _export: Optional[Callable] = None,
         guidance_config: Optional[dict] = None,
     ) -> Union["ConsistencyFlowMatchEulerDiscreteSchedulerOutput", Tuple]:
-        """
-        Predict the sample from the previous timestep by reversing the SDE.
-        
-        Args:
-            model_output: Direct output from learned diffusion model
-            timestep: Current discrete timestep in the diffusion chain
-            sample: Current instance of a sample created by the diffusion process
-            To: Global transformation matrix (4x4)
-            _export: Function to convert latent/depth to mesh
-            enable_guidance_2d: Whether to enable 2D guidance optimization
-            guidance_config: Dictionary with guidance parameters (lr, num_steps, weights)
-            Other args: Standard scheduler parameters
-        
-        Returns:
-            ConsistencyFlowMatchEulerDiscreteSchedulerOutput or tuple with prev_sample
-        """
-        
         # Validate timestep format
         if isinstance(timestep, (int, torch.IntTensor, torch.LongTensor)):
             raise ValueError(
@@ -416,7 +399,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         Kp = self.renderer.fov_to_K_normalized(fov_x, width, height)
 
         # === Optimizable Parameters ===
-        para_velocity = torch.nn.Parameter(model_output.clone().to(device).detach())  # same shape as model_output
+        para_velocity = torch.nn.Parameter(model_output.clone().to(device).to(torch.float32).detach())  # same shape as model_output
 
         if not hasattr(self, "_guidance_pose_params"):
             self._guidance_pose_params = {
@@ -425,6 +408,22 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                 "translation": torch.nn.Parameter(torch.zeros(3, device=device)),
             }
             self._guidance_pose_params_initialized_at_step = self._step_index
+
+            # === Load reference images ===
+            ref_dir = config.get("reference_dir", "/home/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_depth/325_cropped_hoi_1")
+            
+            ref_normal = cv.imread(f"{ref_dir}/rendered_normal.png", cv.IMREAD_COLOR)
+            ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            ref_normal = ref_normal * 2.0 - 1.0          # 映射回 [-1,1]
+            self.ref_normal = torch.from_numpy(ref_normal).to(device)
+
+            ref_disparity = cv.imread(f"{ref_dir}/rendered_disparity.png", cv.IMREAD_GRAYSCALE)
+            ref_disparity = ref_disparity.astype(np.float32) / 255.0
+            self.ref_disparity = torch.from_numpy(ref_disparity).to(device)
+
+            ref_silhouette = cv.imread(f"{ref_dir}/rendered_silhouette.png", cv.IMREAD_GRAYSCALE)
+            ref_silhouette = ref_silhouette.astype(np.float32) / 255.0
+            self.ref_silhouette = torch.from_numpy(ref_silhouette).to(device)
 
         rotvec = self._guidance_pose_params["rotvec"]
         scale = self._guidance_pose_params["scale"]
@@ -436,22 +435,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             {'params': [rotvec], 'lr': lr_rotation},
             {'params': [translation], 'lr': lr_translation},
         ])
-
-        # === Load reference images ===
-        ref_dir = config.get("reference_dir", "/home/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_depth/325_cropped_hoi_1")
-        
-        ref_normal = cv.imread(f"{ref_dir}/rendered_normal.png", cv.IMREAD_COLOR)
-        ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        ref_normal = ref_normal * 2.0 - 1.0          # 映射回 [-1,1]
-        ref_normal = torch.from_numpy(ref_normal).to(device)
-
-        ref_disparity = cv.imread(f"{ref_dir}/rendered_disparity.png", cv.IMREAD_GRAYSCALE)
-        ref_disparity = ref_disparity.astype(np.float32) / 255.0
-        ref_disparity = torch.from_numpy(ref_disparity).to(device)
-
-        ref_silhouette = cv.imread(f"{ref_dir}/rendered_silhouette.png", cv.IMREAD_GRAYSCALE)
-        ref_silhouette = ref_silhouette.astype(np.float32) / 255.0
-        ref_silhouette = torch.from_numpy(ref_silhouette).to(device)
 
 
         if self._step_index == 9:
@@ -481,8 +464,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                 )
 
             vertices, faces = outputs[0]
-            vertices = torch.as_tensor(vertices, device=device, dtype=torch.float32)
-            faces = torch.as_tensor(faces, device=device, dtype=torch.int32)
+            faces = faces.to(torch.int32).contiguous()
 
             # Apply transformation, 利用To转化到pointsmap坐标系, 再利用transform做posed
             # ensure To is a tensor on the correct device/dtype
@@ -496,18 +478,18 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             vertices_homo = (vertices_homo @ To.T)  @ transform.T
             vertices_transformed = vertices_homo[:, :3] / vertices_homo[:, 3:4]
 
-            # if step % 5 == 0:
-            #     with torch.no_grad():
-            #         import os
-            #         debug_dir = "./debug_2d_guidance"
-            #         if not os.path.exists(debug_dir):
-            #             os.makedirs(debug_dir, exist_ok=True)
-            #         v_vis = vertices_transformed.detach().cpu().numpy()
-            #         f_vis = faces.detach().cpu().numpy()
-            #         # 如果你的渲染器是逆时针为正，且画面全黑，试试反转：
-            #         f_vis = np.ascontiguousarray(f_vis)[:, ::-1]
-            #         v_vis = v_vis.astype(np.float32)
-            #         trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
+            if step % 5 == 0:
+                with torch.no_grad():
+                    import os
+                    debug_dir = "./debug_2d_guidance"
+                    if not os.path.exists(debug_dir):
+                        os.makedirs(debug_dir, exist_ok=True)
+                    v_vis = vertices_transformed.clone().detach().cpu().numpy()
+                    f_vis = faces.clone().detach().cpu().numpy()
+                    # 如果你的渲染器是逆时针为正，且画面全黑，试试反转：
+                    f_vis = np.ascontiguousarray(f_vis)[:, ::-1]
+                    v_vis = v_vis.astype(np.float32)
+                    trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
 
             # Render
             render_out = self.renderer.render_normals_disparity_silhouette(
@@ -520,9 +502,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
             # === Compute Losses ===
             # loss_norm = F.l1_loss(normal_map, ref_normal)
-            loss_norm = self.loss_norm(normal_map.permute(2,0,1).unsqueeze(0), ref_normal.permute(2,0,1).unsqueeze(0))
-            loss_disp = F.l1_loss(disp_map, ref_disparity)
-            loss_sil = F.binary_cross_entropy(alpha_map, ref_silhouette)
+            loss_norm = self.loss_norm(normal_map.permute(2,0,1).unsqueeze(0), self.ref_normal.permute(2,0,1).unsqueeze(0))
+            loss_disp = F.l1_loss(disp_map, self.ref_disparity)
+            loss_sil = F.binary_cross_entropy(alpha_map, self.ref_silhouette)
 
             # === Rotation regularization ===
             loss_reg_rot = torch.sum(rotvec ** 2)
@@ -539,6 +521,20 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                 )
             
             # === Backprop ===
+            def debug_contiguity(name, t):
+                if not isinstance(t, torch.Tensor):
+                    print(f"{name}: not a tensor")
+                    return
+                print(f"{name}: dtype={t.dtype} device={t.device} shape={tuple(t.shape)} is_contiguous={t.is_contiguous()} requires_grad={t.requires_grad}")
+
+            # 在 loss.backward() 前调用（用你实际的变量名替换）
+            # 假设 verts, faces 是 DMCSurfaceExtractor.run 返回并最终进入 diso 的张量
+            debug_contiguity("verts", vertices_transformed)
+            debug_contiguity("faces", faces)
+            # 如果你还有 attr / deform / adj_verts（或其他传入 diso 的中间变量），也打印一遍
+
+
+
             loss.backward()
 
             # Per-group grad clipping (different clips for para_velocity vs pose params)
@@ -578,12 +574,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         return para_velocity.detach()
         
     def build_transform_matrix_axis_angle(self, scale, rotvec, translation):
-        """
-        Build a 4×4 transform matrix using:
-        - scale: (3,)
-        - rotvec: (3,) axis-angle vector (Rodrigues)
-        - translation: (3,)
-        """
         angle = torch.linalg.norm(rotvec)
         if angle < 1e-8:
             R = torch.eye(3, device=rotvec.device)
@@ -614,18 +604,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         return transform
     
 
-    def save_debug_image(self,tensor, path, normalize=False):
-        arr = tensor.detach().cpu().numpy()
-        if normalize:
-            arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
-
-        if arr.ndim == 2:
-            arr = (arr * 255).astype(np.uint8)
-            cv.imwrite(path, arr)
-        else:
-            arr = (arr * 255).astype(np.uint8)
-            cv.imwrite(path, cv.cvtColor(arr, cv.COLOR_RGB2BGR))
-
     def loss_norm(self, pred_normal, gt_normal, mask=None, eps=1e-6):
         # --- Normalize both predicted and GT normals ---
         pred = F.normalize(pred_normal, dim=1, eps=eps)
@@ -647,6 +625,23 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         else:
             return loss_map.mean()
 
+    def dice_loss(self, pred, target, smooth=1):
+        pred = torch.sigmoid(pred)
+        intersection = (pred * target).sum()
+        return 1 - (2. * intersection + smooth) / (pred.sum() + target.sum() + smooth)
+
+
+    def save_debug_image(self,tensor, path, normalize=False):
+        arr = tensor.detach().cpu().numpy()
+        if normalize:
+            arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
+
+        if arr.ndim == 2:
+            arr = (arr * 255).astype(np.uint8)
+            cv.imwrite(path, arr)
+        else:
+            arr = (arr * 255).astype(np.uint8)
+            cv.imwrite(path, cv.cvtColor(arr, cv.COLOR_RGB2BGR))
 
 @dataclass
 class UniInvEulerSchedulerOutput(BaseOutput):

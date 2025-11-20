@@ -31,7 +31,7 @@
                 "--output_dir",
                 "output_meshes",
                 "--device",
-                "cuda"
+                "cuda:1"
                 ],
             "env": {"PYTHONPATH": "${workspaceFolder}"},
             "justMyCode": true // 允许调试第三方库（如 hy3dgen）

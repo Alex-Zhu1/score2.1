@@ -290,23 +290,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         _export: Optional[Callable] = None,
         guidance_config: Optional[dict] = None,
     ) -> Union["ConsistencyFlowMatchEulerDiscreteSchedulerOutput", Tuple]:
-        """
-        Predict the sample from the previous timestep by reversing the SDE.
-        
-        Args:
-            model_output: Direct output from learned diffusion model
-            timestep: Current discrete timestep in the diffusion chain
-            sample: Current instance of a sample created by the diffusion process
-            To: Global transformation matrix (4x4)
-            _export: Function to convert latent/depth to mesh
-            enable_guidance_2d: Whether to enable 2D guidance optimization
-            guidance_config: Dictionary with guidance parameters (lr, num_steps, weights)
-            Other args: Standard scheduler parameters
-        
-        Returns:
-            ConsistencyFlowMatchEulerDiscreteSchedulerOutput or tuple with prev_sample
-        """
-        
         # Validate timestep format
         if isinstance(timestep, (int, torch.IntTensor, torch.LongTensor)):
             raise ValueError(
@@ -426,6 +409,22 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             }
             self._guidance_pose_params_initialized_at_step = self._step_index
 
+            # === Load reference images ===
+            ref_dir = config.get("reference_dir", "/home/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_depth/325_cropped_hoi_1")
+            
+            ref_normal = cv.imread(f"{ref_dir}/rendered_normal.png", cv.IMREAD_COLOR)
+            ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            ref_normal = ref_normal * 2.0 - 1.0          # 映射回 [-1,1]
+            self.ref_normal = torch.from_numpy(ref_normal).to(device)
+
+            ref_disparity = cv.imread(f"{ref_dir}/rendered_disparity.png", cv.IMREAD_GRAYSCALE)
+            ref_disparity = ref_disparity.astype(np.float32) / 255.0
+            self.ref_disparity = torch.from_numpy(ref_disparity).to(device)
+
+            ref_silhouette = cv.imread(f"{ref_dir}/rendered_silhouette.png", cv.IMREAD_GRAYSCALE)
+            ref_silhouette = ref_silhouette.astype(np.float32) / 255.0
+            self.ref_silhouette = torch.from_numpy(ref_silhouette).to(device)
+
         rotvec = self._guidance_pose_params["rotvec"]
         scale = self._guidance_pose_params["scale"]
         translation = self._guidance_pose_params["translation"]
@@ -436,22 +435,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             {'params': [rotvec], 'lr': lr_rotation},
             {'params': [translation], 'lr': lr_translation},
         ])
-
-        # === Load reference images ===
-        ref_dir = config.get("reference_dir", "/home/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_depth/325_cropped_hoi_1")
-        
-        ref_normal = cv.imread(f"{ref_dir}/rendered_normal.png", cv.IMREAD_COLOR)
-        ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        ref_normal = ref_normal * 2.0 - 1.0          # 映射回 [-1,1]
-        ref_normal = torch.from_numpy(ref_normal).to(device)
-
-        ref_disparity = cv.imread(f"{ref_dir}/rendered_disparity.png", cv.IMREAD_GRAYSCALE)
-        ref_disparity = ref_disparity.astype(np.float32) / 255.0
-        ref_disparity = torch.from_numpy(ref_disparity).to(device)
-
-        ref_silhouette = cv.imread(f"{ref_dir}/rendered_silhouette.png", cv.IMREAD_GRAYSCALE)
-        ref_silhouette = ref_silhouette.astype(np.float32) / 255.0
-        ref_silhouette = torch.from_numpy(ref_silhouette).to(device)
 
 
         if self._step_index == 9:
@@ -520,9 +503,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
             # === Compute Losses ===
             # loss_norm = F.l1_loss(normal_map, ref_normal)
-            loss_norm = self.loss_norm(normal_map.permute(2,0,1).unsqueeze(0), ref_normal.permute(2,0,1).unsqueeze(0))
-            loss_disp = F.l1_loss(disp_map, ref_disparity)
-            loss_sil = F.binary_cross_entropy(alpha_map, ref_silhouette)
+            loss_norm = self.loss_norm(normal_map.permute(2,0,1).unsqueeze(0), self.ref_normal.permute(2,0,1).unsqueeze(0))
+            loss_disp = F.l1_loss(disp_map, self.ref_disparity)
+            loss_sil = F.binary_cross_entropy(alpha_map, self.ref_silhouette)
 
             # === Rotation regularization ===
             loss_reg_rot = torch.sum(rotvec ** 2)
@@ -578,12 +561,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         return para_velocity.detach()
         
     def build_transform_matrix_axis_angle(self, scale, rotvec, translation):
-        """
-        Build a 4×4 transform matrix using:
-        - scale: (3,)
-        - rotvec: (3,) axis-angle vector (Rodrigues)
-        - translation: (3,)
-        """
         angle = torch.linalg.norm(rotvec)
         if angle < 1e-8:
             R = torch.eye(3, device=rotvec.device)

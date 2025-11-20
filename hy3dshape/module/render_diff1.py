@@ -11,8 +11,7 @@ import cv2 as cv
 # 可微法线计算
 # ===========================================================
 def compute_vertex_normals(verts, faces_int32):
-    # ensure faces are long and contiguous
-    faces = faces_int32.long().contiguous()
+    faces = faces_int32.long()
     v0 = verts[faces[:, 0]]
     v1 = verts[faces[:, 1]]
     v2 = verts[faces[:, 2]]
@@ -40,15 +39,14 @@ def camera_to_clip(verts_cam, Kp, near, far):
     return torch.stack([x_c, y_c, z_c, w], dim=-1)
 
 # ===========================================================
-# 可微渲染主函数（加了 contiguous 的保护）
+# 可微渲染主函数
 # ===========================================================
 def render_normals_disparity_silhouette_differentiable(
     verts_cam, faces, Kp, H, W, near=None, far=None, smooth_mask=True, device="cuda"
 ):
-    # move to device and ensure contiguous & proper dtypes
-    verts_cam = verts_cam.to(device).contiguous()
-    faces = faces.to(device).contiguous()
-    Kp = Kp.to(device).contiguous()
+    verts_cam = verts_cam.to(device)
+    faces = faces.to(device)
+    Kp = Kp.to(device)
 
     Z = verts_cam[:, 2]
     front_z = (-Z).clamp(min=1e-6)
@@ -58,31 +56,38 @@ def render_normals_disparity_silhouette_differentiable(
         far = front_z.max() * 1.5
     near, far = float(near), float(far)
 
-    verts_clip = camera_to_clip(verts_cam, Kp, near, far).unsqueeze(0).contiguous()
-    # ensure float32 dtype for rasterize (nvdiffrast expects float32)
-    if verts_clip.dtype != torch.float32:
-        verts_clip = verts_clip.to(torch.float32)
-
+    verts_clip = camera_to_clip(verts_cam, Kp, near, far).unsqueeze(0)  # verts是点集合，而face是点索引，所以不需要对face进行transform
     ctx = dr.RasterizeGLContext(device=device)
     rast, _ = dr.rasterize(ctx, verts_clip, faces, (H, W))
 
-    if smooth_mask:
+    if smooth_mask:  # silhouette， 类似与二值mask，即这个像素是否被物体占据
         sil = torch.sigmoid(500.0 * rast[..., 3:])
     else:
         sil = (rast[..., 3:] > 0).float()
 
-    vnorm = compute_vertex_normals(verts_cam, faces)  # 已在函数内保证 faces.contiguous()
-    inv_front_z = (1.0 / front_z).unsqueeze(-1)
-    attr = torch.cat([vnorm, inv_front_z], dim=-1)[None, ...].contiguous()  # also make attr contiguous
+    vnorm = compute_vertex_normals(verts_cam, faces)  # 计算每个顶点的法线向量
+    inv_front_z = (1.0 / front_z).unsqueeze(-1)  # 计算每个顶点的逆深度值
+    attr = torch.cat([vnorm, inv_front_z], dim=-1)[None, ...]
 
+    '''nvdiffrast 会：
+        对每个像素找到它属于哪个三角形；
+        根据 rast 提供的重心坐标；
+        对该三角形三个顶点的属性加权求和（透视校正插值）；
+        输出该像素的属性 attr_img[y, x, :]。
+
+        于是：
+        attr_img[..., :3] → 每像素的法线；
+        attr_img[..., 3] → 每像素的逆深度。像素的逆深度是线性的。
+        '''
     attr_img, _ = dr.interpolate(attr, rast, faces)
 
-    n_img = F.normalize(attr_img[..., :3], dim=-1, eps=1e-8)
-    inv_depth = torch.maximum(attr_img[..., 3:4], torch.tensor(1e-8, device=device))
+
+    n_img = F.normalize(attr_img[..., :3], dim=-1, eps=1e-8)  # 由于插值（这里是因为顶点的法线，转化到像素中心的发现，这个插值是位于球面的，但重心插值又是线性的），像素的法线不是单位向量，需要归一化，数值范围是 ∈[−1,1]^3
+    inv_depth = torch.maximum(attr_img[..., 3:4], torch.tensor(1e-8, device=device))  # 逆深度过小，说明是背景，所以用一个很小的值代替，避免深度计算除零
     depth = 1.0 / inv_depth
     disparity = inv_depth
 
-    n_vis = (n_img * 0.5 + 0.5) * sil
+    n_vis = (n_img * 0.5 + 0.5) * sil  # 法线可视化，从[-1, 1]映射到[0,1]范围内，
     depth = depth * sil
     disparity = disparity * sil
 
@@ -105,7 +110,6 @@ def fov_to_K_normalized(fov_x_deg, width, height):
     cxp, cyp = 0.5, 0.5
     Kp = torch.tensor([[fxp, 0, cxp], [0, fyp, cyp], [0, 0, 1]], dtype=torch.float32)
     return Kp
-
 
 # ===========================================================
 # 可视化辅助函数 (不破坏计算图)

@@ -294,13 +294,13 @@ class Hunyuan3DDiTPipeline:
             #         use_safetensors=self.kwargs['from_pretrained_kwargs']['use_safetensors'],
             #         device=self.device,
             #     )
-            # self.vae = ShapeVAE.from_pretrained(
-            #         'tencent/Hunyuan3D-2.1',
-            #         # subfolder='hunyuan3d-vae-v2-0-withencoder',
-            #         use_safetensors=self.kwargs['from_pretrained_kwargs']['use_safetensors'],
-            #         # pc_size = 30720,
-            #         # pc_sharpedge_size= 30720
-            #     )
+            self.vae = ShapeVAE.from_pretrained(
+                    'tencent/Hunyuan3D-2.1',
+                    # subfolder='hunyuan3d-vae-v2-0-withencoder',
+                    use_safetensors=self.kwargs['from_pretrained_kwargs']['use_safetensors'],
+                    # pc_size = 30720,
+                    # pc_sharpedge_size= 30720
+                )
             self.vae.enable_flashvdm_decoder(
                 enabled=enabled,
                 adaptive_kv_selection=adaptive_kv_selection,
@@ -998,32 +998,32 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                                     )  # 这里面的apply_transform是in place 操作，所以直接修改了mesh
                         
                         # 可视化（可选）
-                        # if enable_pbar:
-                        #     print(f"[Phase 2] Exporting intermediate mesh at step {i+1}")
-                        #     dir = "vis_phase2_mid_mesh"
-                        #     os.makedirs(dir, exist_ok=True)
-                        #     import time
+                        if enable_pbar:
+                            print(f"[Phase 2] Exporting intermediate mesh at step {i+1}")
+                            dir = "vis_phase2_mid_mesh"
+                            os.makedirs(dir, exist_ok=True)
+                            import time
 
-                        #     if isinstance(mesh_i, list):
-                        #         for midx, m in enumerate(mesh_i):
+                            if isinstance(mesh_i, list):
+                                for midx, m in enumerate(mesh_i):
 
-                        #             # ----- 1. 保存未应用 To 的 mesh -----
-                        #             m_orig = m.copy()  # 一定要 copy，否则会被改坏
-                        #             m_orig.export(f"{dir}/phase2_step{i+1}_orig_{midx}_{time.time()}.glb")
+                                    # ----- 1. 保存未应用 To 的 mesh -----
+                                    m_orig = m.copy()  # 一定要 copy，否则会被改坏
+                                    m_orig.export(f"{dir}/phase2_step{i+1}_orig_{midx}_{time.time()}.glb")
 
-                        #             # ----- 2. 保存应用 To 之后的 mesh -----
-                        #             m_trans = m.copy()
-                        #             m_trans.apply_transform(To)
-                        #             m_trans.export(f"{dir}/phase2_step{i+1}_to_{midx}_{time.time()}.glb")
+                                    # ----- 2. 保存应用 To 之后的 mesh -----
+                                    m_trans = m.copy()
+                                    m_trans.apply_transform(To)
+                                    m_trans.export(f"{dir}/phase2_step{i+1}_to_{midx}_{time.time()}.glb")
 
-                        #     else:
-                        #         # 单个 mesh 的情况
-                        #         m_orig = mesh_i.copy()
-                        #         m_orig.export(f"{dir}/phase2_step{i}_orig_{time.time()}.glb")
+                            else:
+                                # 单个 mesh 的情况
+                                m_orig = mesh_i.copy()
+                                m_orig.export(f"{dir}/phase2_step{i}_orig_{time.time()}.glb")
 
-                        #         m_trans = mesh_i.copy()
-                        #         m_trans.apply_transform(To)
-                        #         m_trans.export(f"{dir}/phase2_step{i}_to_{time.time()}.glb")
+                                m_trans = mesh_i.copy()
+                                m_trans.apply_transform(To)
+                                m_trans.export(f"{dir}/phase2_step{i}_to_{time.time()}.glb")
 
         
                 elif 8 < i < 15 and To is not None:

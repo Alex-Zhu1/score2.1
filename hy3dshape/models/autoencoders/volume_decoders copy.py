@@ -118,28 +118,130 @@ def extract_near_surface_volume_fn(input_tensor: torch.Tensor, alpha: float):
     mask = (~same_sign).to(torch.int32)
     return mask * valid_mask.to(torch.int32)
 
+
 def generate_dense_grid_points(
-    bbox_min: torch.Tensor,
-    bbox_max: torch.Tensor,
+    bbox_min: np.ndarray,
+    bbox_max: np.ndarray,
     octree_resolution: int,
     indexing: str = "ij",
 ):
-    # length = bbox_max - bbox_min  # differentiable if needed
-
+    length = bbox_max - bbox_min
     num_cells = octree_resolution
 
-    xs = torch.linspace(bbox_min[0], bbox_max[0], num_cells + 1, device=bbox_min.device)
-    ys = torch.linspace(bbox_min[1], bbox_max[1], num_cells + 1, device=bbox_min.device)
-    zs = torch.linspace(bbox_min[2], bbox_max[2], num_cells + 1, device=bbox_min.device)
+    x = np.linspace(bbox_min[0], bbox_max[0], int(num_cells) + 1, dtype=np.float32)
+    y = np.linspace(bbox_min[1], bbox_max[1], int(num_cells) + 1, dtype=np.float32)
+    z = np.linspace(bbox_min[2], bbox_max[2], int(num_cells) + 1, dtype=np.float32)
+    [xs, ys, zs] = np.meshgrid(x, y, z, indexing=indexing)
+    xyz = np.stack((xs, ys, zs), axis=-1)
+    grid_size = [int(num_cells) + 1, int(num_cells) + 1, int(num_cells) + 1]
 
-    # fully differentiable meshgrid (torch)
-    xs, ys, zs = torch.meshgrid(xs, ys, zs, indexing=indexing)  # (N,N,N)
+    return xyz, grid_size, length
 
-    xyz = torch.stack([xs, ys, zs], dim=-1).reshape(-1, 3)  # (N^3, 3)
 
-    grid_size = (num_cells + 1, num_cells + 1, num_cells + 1)
+# class VanillaVolumeDecoder:
+#     # @torch.no_grad()
+#     def __call__(
+#         self,
+#         latents: torch.FloatTensor,
+#         geo_decoder: Callable,
+#         bounds: Union[Tuple[float], List[float], float] = 1.01,
+#         num_chunks: int = 10000,
+#         octree_resolution: int = None,
+#         enable_pbar: bool = True,
+#         **kwargs,
+#     ):
+#         device = latents.device
+#         dtype = latents.dtype
+#         batch_size = latents.shape[0]
 
-    return xyz, grid_size
+#         # 1. generate query points
+#         if isinstance(bounds, float):
+#             bounds = [-bounds, -bounds, -bounds, bounds, bounds, bounds]
+
+#         bbox_min, bbox_max = np.array(bounds[0:3]), np.array(bounds[3:6])
+#         xyz_samples, grid_size, length = generate_dense_grid_points(
+#             bbox_min=bbox_min,
+#             bbox_max=bbox_max,
+#             octree_resolution=octree_resolution,
+#             indexing="ij"
+#         )
+#         xyz_samples = torch.from_numpy(xyz_samples).to(device, dtype=dtype).contiguous().reshape(-1, 3)
+
+#         # 2. latents to 3d volume
+#         batch_logits = []
+#         for start in tqdm(range(0, xyz_samples.shape[0], num_chunks), desc=f"Volume Decoding",
+#                           disable=not enable_pbar):
+#             chunk_queries = xyz_samples[start: start + num_chunks, :]
+#             chunk_queries = repeat(chunk_queries, "p c -> b p c", b=batch_size)
+#             logits = geo_decoder(queries=chunk_queries, latents=latents)  # CrossAttentionDecoder
+#             batch_logits.append(logits)
+
+#         grid_logits = torch.cat(batch_logits, dim=1)
+#         grid_logits = grid_logits.view((batch_size, *grid_size)).float()
+
+#         return grid_logits
+
+
+# class VanillaVolumeDecoder:
+#     def __call__(
+#         self,
+#         latents: torch.FloatTensor,
+#         geo_decoder: Callable,
+#         bounds: Union[Tuple[float], List[float], float] = 1.01,
+#         num_chunks: int = 10000,
+#         octree_resolution: int = None,
+#         enable_pbar: bool = True,
+#         requires_grad: bool = True,  # ✅ 新增开关
+#         **kwargs,
+#     ):
+#         device = latents.device
+#         dtype = latents.dtype
+#         batch_size = latents.shape[0]
+
+#         # 1. generate query points
+#         if isinstance(bounds, float):
+#             bounds = [-bounds, -bounds, -bounds, bounds, bounds, bounds]
+
+#         bbox_min, bbox_max = np.array(bounds[0:3]), np.array(bounds[3:6])
+#         xyz_samples, grid_size, _ = generate_dense_grid_points(
+#             bbox_min=bbox_min,
+#             bbox_max=bbox_max,
+#             octree_resolution=octree_resolution,
+#             indexing="ij"
+#         )
+#         xyz_samples = torch.from_numpy(xyz_samples).to(device, dtype=dtype).contiguous().reshape(-1, 3)
+
+#         # 2. latents to 3d volume
+#         batch_logits = []
+#         for start in tqdm(
+#             range(0, xyz_samples.shape[0], num_chunks),
+#             desc=f"Volume Decoding",
+#             disable=not enable_pbar,
+#         ):
+#             chunk_queries = xyz_samples[start: start + num_chunks, :]
+#             chunk_queries = repeat(chunk_queries, "p c -> b p c", b=batch_size)
+
+#             # ✅ 控制是否保留梯度
+#             if requires_grad:
+#                 # 需要梯度时启用 checkpoint 节省显存
+#                 # logits = torch.utils.checkpoint.checkpoint(geo_decoder, chunk_queries, latents)
+#                 with torch.enable_grad():
+#                     # logits = geo_decoder(queries=chunk_queries, latents=latents)
+#                     logits = torch.utils.checkpoint.checkpoint(lambda q, l: geo_decoder(queries=q, latents=l), chunk_queries, latents)
+#             else:
+#                 with torch.no_grad():
+#                     logits = geo_decoder(queries=chunk_queries, latents=latents)
+
+
+#             batch_logits.append(logits)
+
+#         grid_logits = torch.cat(batch_logits, dim=1)
+#         grid_logits = grid_logits.view((batch_size, *grid_size)).float()
+
+#         return grid_logits
+
+
+from torch.utils.checkpoint import checkpoint
 
 class VanillaVolumeDecoder:
     def __call__(
@@ -150,47 +252,68 @@ class VanillaVolumeDecoder:
         num_chunks: int = 10000,
         octree_resolution: int = None,
         enable_pbar: bool = True,
+        requires_grad: bool = False,
+        use_checkpoint: bool = False,   # ✅ 控制是否启用 checkpoint
         **kwargs,
     ):
         device = latents.device
         dtype = latents.dtype
         batch_size = latents.shape[0]
 
-        # ---- 1. generate fully-differentiable grid points (torch-based)
+        # 1️⃣ generate dense grid
         if isinstance(bounds, float):
             bounds = [-bounds, -bounds, -bounds, bounds, bounds, bounds]
 
-        bbox_min = torch.tensor(bounds[0:3], device=device, dtype=dtype)
-        bbox_max = torch.tensor(bounds[3:6], device=device, dtype=dtype)
-
-        xyz_samples, grid_size = generate_dense_grid_points(
+        bbox_min, bbox_max = np.array(bounds[0:3]), np.array(bounds[3:6])
+        xyz_samples, grid_size, _ = generate_dense_grid_points(
             bbox_min=bbox_min,
             bbox_max=bbox_max,
             octree_resolution=octree_resolution,
-            indexing="ij",
-        )  # (N, 3)
+            indexing="ij"
+        )
+        xyz_samples = (
+            torch.from_numpy(xyz_samples)
+            .to(device, dtype=dtype)
+            .contiguous()
+            .reshape(-1, 3)
+        )
 
-        xyz_samples = xyz_samples.contiguous()
-
-        # ---- 2. latents → logits (cross attention)
+        # 2️⃣ decoding context: enable_grad / no_grad
+        grad_context = torch.enable_grad() if requires_grad else torch.no_grad()
         batch_logits = []
 
-        iterator = range(0, xyz_samples.shape[0], num_chunks)
-        if enable_pbar:
-            from tqdm import tqdm
-            iterator = tqdm(iterator, desc="Volume Decoding")
+        with grad_context:
+            iterator = tqdm(
+                range(0, xyz_samples.shape[0], num_chunks),
+                desc="Volume Decoding",
+                disable=not enable_pbar,
+            )
 
-        for start in iterator:
-            chunk_queries = xyz_samples[start: start + num_chunks]  # (P, 3)
-            chunk_queries = repeat(chunk_queries, "p c -> b p c", b=batch_size)
+            for start in iterator:
+                chunk_queries = xyz_samples[start:start + num_chunks, :]
+                chunk_queries = repeat(chunk_queries, "p c -> b p c", b=batch_size)
 
-            # fully differentiable
-            logits = geo_decoder(queries=chunk_queries, latents=latents)
-            batch_logits.append(logits)
+                if requires_grad and use_checkpoint:
+                    # ✅ checkpoint 节省显存
+                    logits = checkpoint(
+                        lambda q, l: geo_decoder(queries=q, latents=l),
+                        chunk_queries, latents, use_reentrant=False
+                    )
+                else:
+                    logits = geo_decoder(queries=chunk_queries, latents=latents)
 
+                # ✅ detach 防止累计计算图
+                if requires_grad:
+                    batch_logits.append(logits.detach())
+                else:
+                    batch_logits.append(logits)
+
+                # del logits, chunk_queries
+                # torch.cuda.empty_cache()  # 释放显存
+
+        # 3️⃣ reshape to 3D grid
         grid_logits = torch.cat(batch_logits, dim=1)
-        grid_logits = grid_logits.reshape(batch_size, *grid_size)
-
+        grid_logits = grid_logits.view((batch_size, *grid_size)).float()
         return grid_logits
 
 
@@ -289,7 +412,7 @@ class HierarchicalVolumeDecoding:
         return grid_logits
 
 
-class FlashVDMVolumeDecoding:
+class FlashVDMVolumeDecoding_ori:
     def __init__(self, topk_mode='mean'):
         if topk_mode not in ['mean', 'merge']:
             raise ValueError(f'Unsupported topk_mode {topk_mode}, available: {["mean", "merge"]}')
@@ -299,7 +422,7 @@ class FlashVDMVolumeDecoding:
         else:
             self.processor = FlashVDMTopMCrossAttentionProcessor()
 
-    # @torch.no_grad()
+    @torch.no_grad()
     def __call__(
         self,
         latents: torch.FloatTensor,

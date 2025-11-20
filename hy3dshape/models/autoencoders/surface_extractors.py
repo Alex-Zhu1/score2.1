@@ -71,17 +71,6 @@ class SurfaceExtractor:
         return NotImplementedError
 
     def __call__(self, grid_logits, requires_grad: bool = False, **kwargs):
-        """
-        Process a batch of grid logits to extract surface meshes.
-
-        Args:
-            grid_logits (torch.Tensor): Batch of grid logits with shape (batch_size, ...).
-            **kwargs: Additional keyword arguments passed to the `run` method.
-
-        Returns:
-            List[Optional[Latent2MeshOutput]]: List of mesh outputs for each grid in the batch.
-                If extraction fails for a grid, None is appended at that position.
-        """
         outputs = []
         for i in range(grid_logits.shape[0]):
             try:
@@ -130,24 +119,33 @@ class MCSurfaceExtractor(SurfaceExtractor):
         return vertices, faces
 
 
-class DMCSurfaceExtractor(SurfaceExtractor):
+# class DMCSurfaceExtractor(SurfaceExtractor):
+#     def run(self, grid_logit, *, octree_resolution, requires_grad, **kwargs):
+#         device = grid_logit.device
+#         if not hasattr(self, 'dmc'):
+#             try:
+#                 from diso import DiffDMC
+#                 self.dmc = DiffDMC(dtype=torch.float32).to(device)
+#             except:
+#                 raise ImportError("Please install diso via `pip install diso`, or set mc_algo to 'mc'")
+#         sdf = -grid_logit / octree_resolution
+#         sdf = sdf.to(torch.float32).contiguous()
+#         verts, faces = self.dmc(sdf, deform=None, return_quads=False, normalize=False)  # norm也要关掉
+
+#         # verts = center_vertices(verts)  # 这里改变了 verts的值，也就是缩放了w 
+
+#         if requires_grad:
+#             # 保持可微（Torch Tensor）
+#             idx = torch.arange(faces.shape[1]-1, -1, -1, device=faces.device)
+#             faces = faces[:, idx]  # 通用反转，不假设面顶点数
+#             return verts, faces
+#         else:
+#             vertices = verts.detach().cpu().numpy()
+#             faces = faces.detach().cpu().numpy()[:, ::-1]
+#         return vertices, faces
+
+class DMCSurfaceExtractor_(SurfaceExtractor):
     def run(self, grid_logit, *, octree_resolution, requires_grad, **kwargs):
-        """
-        Extract surface mesh using Differentiable Marching Cubes (DMC) algorithm.
-
-        Args:
-            grid_logit (torch.Tensor): 3D grid logits tensor representing the scalar field.
-            octree_resolution (int): Resolution of the octree grid.
-            **kwargs: Additional keyword arguments (ignored).
-
-        Returns:
-            Tuple[np.ndarray, np.ndarray]: Tuple containing:
-                - vertices (np.ndarray): Extracted mesh vertices, centered and converted to numpy.
-                - faces (np.ndarray): Extracted mesh faces (triangles), with reversed vertex order.
-        
-        Raises:
-            ImportError: If the 'diso' package is not installed.
-        """
         device = grid_logit.device
         if not hasattr(self, 'dmc'):
             try:
@@ -155,20 +153,105 @@ class DMCSurfaceExtractor(SurfaceExtractor):
                 self.dmc = DiffDMC(dtype=torch.float32).to(device)
             except:
                 raise ImportError("Please install diso via `pip install diso`, or set mc_algo to 'mc'")
-        sdf = -grid_logit / octree_resolution
-        sdf = sdf.to(torch.float32).contiguous()
+
+        sdf = (-grid_logit / octree_resolution).to(torch.float32).contiguous()
+
         verts, faces = self.dmc(sdf, deform=None, return_quads=False, normalize=False)
-        # verts = center_vertices(verts)  # 这里改变了 verts的值，也就是缩放了w 
+
+        # Force contiguous always (safe for backward)
+        verts = verts.contiguous()
+        faces = faces.contiguous()
 
         if requires_grad:
-            # 保持可微（Torch Tensor）
             idx = torch.arange(faces.shape[1]-1, -1, -1, device=faces.device)
-            faces = faces[:, idx]  # 通用反转，不假设面顶点数
+            faces = faces[:, idx].contiguous()
             return verts, faces
         else:
             vertices = verts.detach().cpu().numpy()
             faces = faces.detach().cpu().numpy()[:, ::-1]
-        return vertices, faces
+            return vertices, faces
+
+
+class DMCSurfaceExtractor(SurfaceExtractor):
+    def run(self, grid_logit, *, octree_resolution, requires_grad, **kwargs):
+        device = grid_logit.device
+        
+        # 初始化 FlexiCubes
+        if not hasattr(self, 'flexicubes'):
+            try:
+                from kaolin.ops.conversions import FlexiCubes
+                self.flexicubes = FlexiCubes(device=device)
+            except:
+                raise ImportError("Please install kaolin with FlexiCubes support")
+        
+        # 获取分辨率
+        # grid_logit shape: (253, 253, 253) 表示 253 个顶点，对应 252 个体素
+        assert grid_logit.shape[0] == grid_logit.shape[1] == grid_logit.shape[2], \
+            "grid_logit must be cubic"
+        
+        grid_res = grid_logit.shape[0]  # 253
+        voxel_res = grid_res - 1  # 252，实际的体素数量
+        
+        # 与 DMC 保持一致的 SDF 归一化
+        # 这里的 octree_resolution 应该是指体素分辨率（如 252 或 256）
+        sdf = (-grid_logit / octree_resolution).to(torch.float32).contiguous()  # 这里scale, 体素规格设定为 octree_resolution=256
+        
+        # 构建体素网格（首次调用时）
+        if not hasattr(self, '_voxelgrid_cache') or self._voxelgrid_cache[0] != voxel_res:
+            voxelgrid_vertices, cube_idx = self.flexicubes.construct_voxel_grid(voxel_res)
+            # construct_voxel_grid 返回的顶点在 [-1, 1] 范围内
+            # 顶点数量应该是 (voxel_res+1)^3 = 253^3
+            self._voxelgrid_cache = (voxel_res, voxelgrid_vertices.to(device), cube_idx.to(device))
+        
+        _, voxelgrid_vertices, cube_idx = self._voxelgrid_cache
+        
+        # 将 3D 网格的 SDF 展平为 1D，与 voxelgrid_vertices 对应
+        # voxelgrid_vertices 的顺序是：x 变化最快，然后 y，最后 z
+        # 对应 grid_logit 需要按 (z, y, x) 顺序展平
+        # scalar_field = sdf.permute(2, 1, 0).reshape(-1)  # (253*253*253,)
+        
+        # 或者，如果 grid_logit 已经是 (x, y, z) 顺序：
+        scalar_field = sdf.reshape(-1)
+        
+        assert scalar_field.shape[0] == voxelgrid_vertices.shape[0], \
+            f"SDF vertices {scalar_field.shape[0]} != grid vertices {voxelgrid_vertices.shape[0]}"
+        
+        # 提取网格
+        if requires_grad:
+            verts, faces, l_dev = self.flexicubes(
+                voxelgrid_vertices=voxelgrid_vertices,
+                scalar_field=scalar_field,
+                cube_idx=cube_idx,
+                resolution=voxel_res,
+                training=True,
+                output_tetmesh=False,
+                weight_scale=0.99,
+            )
+            
+            # 保持与 DMC 一致的面方向，flexicube 默认逆时针，法线朝外
+            # idx = torch.arange(faces.shape[1]-1, -1, -1, device=faces.device)
+            # faces = faces[:, idx].contiguous()
+            
+            # verts = verts.contiguous()
+            # faces = faces.contiguous()
+            
+            return verts, faces
+        else:
+            with torch.no_grad():
+                verts, faces, l_dev = self.flexicubes(
+                    voxelgrid_vertices=voxelgrid_vertices,
+                    scalar_field=scalar_field,
+                    cube_idx=cube_idx,
+                    resolution=voxel_res,
+                    training=False,
+                    output_tetmesh=False,
+                )
+            
+            vertices = verts.detach().cpu().numpy()
+            faces = faces.detach().cpu().numpy()[:, ::-1]
+            
+            return vertices, faces
+
 
 
 SurfaceExtractors = {
