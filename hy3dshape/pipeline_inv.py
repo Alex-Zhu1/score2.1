@@ -231,7 +231,7 @@ class HunyuanInversion:
                         octree_resolution=octree_resolution,
                         mc_level=mc_level,
                         num_chunks=num_chunks,
-                        mc_algo='mc',   # 需要使用mc，查看 inverison 的hunyuan mesh在哪
+                        mc_algo=mc_algo,   # 需要使用mc，查看 inverison 的hunyuan mesh在哪
                         enable_pbar=enable_pbar,
                         cond=cond_hand,
                         num_inference_steps=num_inference_steps,
@@ -290,7 +290,7 @@ class HunyuanInversion:
                         mc_level=mc_level,
                         num_chunks=num_chunks,
                         octree_resolution=octree_resolution,
-                        mc_algo='dmc',   # NOTE: 使用mc + norm, 以配准到cube的hunyuna空间
+                        mc_algo='dmc',   # NOTE: 这里可以测试dmc的space
                         enable_pbar=enable_pbar,
                     )
                 if isinstance(mesh, list):
