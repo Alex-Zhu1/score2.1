@@ -193,7 +193,7 @@ class HunyuanInversion:
                         mc_level=mc_level,
                         num_chunks=num_chunks,
                         octree_resolution=octree_resolution,
-                        mc_algo='dmc',   # NOTE: 使用mc + norm, 以配准到cube的hunyuna空间
+                        mc_algo='mc',   # NOTE: 使用mc + norm, 以配准到cube的hunyuna空间
                         enable_pbar=enable_pbar,
                     )
 
@@ -281,7 +281,7 @@ class HunyuanInversion:
             latents = self.vae.scale_factor * latents
 
             # test decode
-            vis_test_decoding = True # 奇怪的是，这里配准完了，再重建。也不能返回 Hunyuan的空间，除非有norm. 也就是说vae本身是缩放的
+            vis_test_decoding = True
             if vis_test_decoding:
                 import time
                 mesh = self._export(
@@ -290,7 +290,7 @@ class HunyuanInversion:
                         mc_level=mc_level,
                         num_chunks=num_chunks,
                         octree_resolution=octree_resolution,
-                        mc_algo='mc',   # NOTE: 使用mc + norm, 以配准到cube的hunyuna空间
+                        mc_algo='dmc',   # NOTE: 使用mc + norm, 以配准到cube的hunyuna空间
                         enable_pbar=enable_pbar,
                     )
                 if isinstance(mesh, list):
