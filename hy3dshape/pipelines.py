@@ -108,7 +108,7 @@ def export_to_trimesh(mesh_output, mc_algo='mc', requires_grad=False):
                     mesh_v = mesh_v.detach().cpu().numpy()
                     mesh_v = mesh_v.astype(np.float32)
                     mesh_f = np.ascontiguousarray(mesh_f)[:, ::-1]
-                    mesh_output = trimesh.Trimesh(mesh_v, mesh_f)
+                    mesh_output = trimesh.Trimesh(mesh_v, mesh_f, process=False)
                     outputs.append(mesh_output)
                 else:
                     # if mc_algo == 'dmc':
@@ -118,7 +118,7 @@ def export_to_trimesh(mesh_output, mc_algo='mc', requires_grad=False):
                     #     outputs.append(mesh_output)
                     # else:
                     mesh.mesh_f = mesh.mesh_f[:, ::-1]
-                    mesh_output = trimesh.Trimesh(mesh.mesh_v, mesh.mesh_f)
+                    mesh_output = trimesh.Trimesh(mesh.mesh_v, mesh.mesh_f, process=False)
                     outputs.append(mesh_output)
         return outputs
     else:
@@ -844,97 +844,35 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         # ========== Phase 1: Inversion Stage ==========
         if do_inversion_stage:
 
-            inv = HunyuanInversion(self)
-            phase1_scheduler = copy.deepcopy(self.scheduler)
-            timesteps_phase1 = timesteps.clone()
-            
-            with synchronize_timer('Phase 1: Partial Sampling + Inversion'):
-                pbar = tqdm(timesteps_phase1, disable=not enable_pbar, desc="(Phase 1) Partial Sampling + Inversion:")
-                for i, t in enumerate(pbar):
-                    if do_classifier_free_guidance:
-                        latent_model_input = torch.cat([latents] * 2)
-                    else:
-                        latent_model_input = latents
-
-                    timestep = t.expand(latent_model_input.shape[0]).to(latents.dtype)
-                    timestep = timestep / phase1_scheduler.config.num_train_timesteps
-                    
-                    noise_pred = self.model(latent_model_input, timestep, cond_ref, guidance=guidance)
-
-                    if do_classifier_free_guidance:
-                        noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-                    outputs = phase1_scheduler.step(noise_pred, t, latents)
-                    latents = outputs.prev_sample
-
-                    if i == 9 or i == num_inference_steps - 1:
-                        pbar.close()
-                        
-                        # 导出中间 mesh
-                        mesh_i = self._export(
-                            outputs.pred_original_sample,
-                            box_v=box_v,
-                            mc_level=mc_level,
-                            num_chunks=num_chunks,
-                            octree_resolution=octree_resolution,
-                            mc_algo='mc',   # NOTE: 使用mc + norm, 以配准到cube的hunyuna空间
-                            enable_pbar=enable_pbar,
-                        )
-
-                        # 可视化
-                        if enable_pbar:
-                            print(f"[Phase 1] Exporting intermediate mesh at step {i+1}")
-                            dir = "vis_phase1_mid_mesh"
-                            os.makedirs(dir, exist_ok=True)
-                            import time
-                            if isinstance(mesh_i, list):
-                                for midx, m in enumerate(mesh_i):
-                                    m.export(f"{dir}/check_step10_{midx}_{time.time()}.glb")
-                            else:
-                                mesh_i.export(f"{dir}/check_step10_{time.time()}.glb")
-
-                        # # Registration
-                        logger.info(f"[Phase 1] Start registration + inversion...")
-                        Th, To = inv.registration(
-                            hunyuan_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
-                            hamer_mesh=mesh_path,
-                            moge_pointmap=moge_path,
-                            moge_hand_pointmap=moge_hand_path
-                        )
-
-                        # Inversion
-                        inversion = True if mesh_path is not None else False
-                        latents = inv.inversion(
-                            mesh_path=mesh_path,
-                            Th=Th,
-                            To=To,
-                            device=device,
-                            batch_size=batch_size,
-                            inversion=inversion,
-                            box_v=box_v,
-                            octree_resolution=octree_resolution,
-                            mc_level=mc_level,
-                            num_chunks=num_chunks,
-                            mc_algo='dmc',   # 使用mc，查看 inverison 的hunyuan mesh在哪
-                            enable_pbar=enable_pbar,
-                            cond=cond_hand,
-                            num_inference_steps=num_inference_steps,
-                            timesteps=timesteps,
-                            do_classifier_free_guidance=do_classifier_free_guidance,
-                            guidance_scale=guidance_scale,
-                            generator=generator,
-                        )
-                        
-                        # del outputs, mesh_i, phase1_scheduler, Th
-                        # torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
-                        break
+            inv_pipeline = HunyuanInversion(self)
+            latents, To = inv_pipeline(
+                                        latents=latents,
+                                        cond_ref=cond_ref,
+                                        cond_hand=cond_hand,  # 注意
+                                        timesteps=timesteps,
+                                        do_classifier_free_guidance=do_classifier_free_guidance,
+                                        guidance_scale=guidance_scale,
+                                        guidance=guidance,
+                                        mesh_path=mesh_path,
+                                        moge_path=moge_path,
+                                        moge_hand_path=moge_hand_path,
+                                        num_inference_steps=num_inference_steps,
+                                        sigmas=sigmas,
+                                        eta=eta,
+                                        generator=generator,
+                                        box_v=box_v,
+                                        octree_resolution=octree_resolution,
+                                        mc_level=mc_level,
+                                        mc_algo=mc_algo,
+                                        num_chunks=num_chunks,
+                                        output_type=output_type,
+                                        enable_pbar=enable_pbar
+                                    )
                 
         # ========== 第一阶段采样结束：为了inversion以及配准参数，耗时 8s（sampling）+ 3s (registration) + 3s (inversion) ==========
 
         # 重置 scheduler 状态
-        self.scheduler._step_index = None
+        # self.scheduler._step_index = None
         # if hasattr(self.scheduler, 'timesteps'):
         #     self.scheduler.timesteps = None
         

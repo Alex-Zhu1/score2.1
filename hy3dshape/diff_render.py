@@ -1,8 +1,11 @@
+import os
+if 'TORCH_CUDA_ARCH_LIST' not in os.environ:
+    os.environ['TORCH_CUDA_ARCH_LIST'] = '8.6'  # 根据您的GPU设置
+
 import torch
 import torch.nn.functional as F
 import math
 import nvdiffrast.torch as dr
-
 
 class DifferentiableRenderer:
     """

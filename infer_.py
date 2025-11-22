@@ -103,7 +103,7 @@ def main(args):
         args.model_path,
         device=args.device
     )
-    # pipeline_shapegen.enable_flashvdm(mc_algo='dmc')  
+    pipeline_shapegen.enable_flashvdm(mc_algo='dmc')  
 
 
     rembg = BackgroundRemover()
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda:1",
+        default="cuda",
         choices=["cuda", "cpu", "cuda:0", "cuda:1", "cuda:2", "cuda:3", "cuda:4", "cuda:5", "cuda:6", "cuda:7"],
         help="Device to run the model on"
     )

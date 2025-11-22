@@ -144,7 +144,7 @@ class MCSurfaceExtractor(SurfaceExtractor):
 #             faces = faces.detach().cpu().numpy()[:, ::-1]
 #         return vertices, faces
 
-class DMCSurfaceExtractor_(SurfaceExtractor):
+class DMCSurfaceExtractor(SurfaceExtractor):
     def run(self, grid_logit, *, octree_resolution, requires_grad, **kwargs):
         device = grid_logit.device
         if not hasattr(self, 'dmc'):
@@ -172,7 +172,7 @@ class DMCSurfaceExtractor_(SurfaceExtractor):
             return vertices, faces
 
 
-class DMCSurfaceExtractor(SurfaceExtractor):
+class DMCSurfaceExtractor_(SurfaceExtractor):
     def run(self, grid_logit, *, octree_resolution, requires_grad, **kwargs):
         device = grid_logit.device
         
@@ -211,7 +211,7 @@ class DMCSurfaceExtractor(SurfaceExtractor):
         # scalar_field = sdf.permute(2, 1, 0).reshape(-1)  # (253*253*253,)
         
         # 或者，如果 grid_logit 已经是 (x, y, z) 顺序：
-        scalar_field = sdf.reshape(-1)
+        scalar_field = sdf.reshape(-1)  # (253*253*253,)  # 这个顺序才对
         
         assert scalar_field.shape[0] == voxelgrid_vertices.shape[0], \
             f"SDF vertices {scalar_field.shape[0]} != grid vertices {voxelgrid_vertices.shape[0]}"
@@ -229,11 +229,11 @@ class DMCSurfaceExtractor(SurfaceExtractor):
             )
             
             # 保持与 DMC 一致的面方向，flexicube 默认逆时针，法线朝外
-            # idx = torch.arange(faces.shape[1]-1, -1, -1, device=faces.device)
-            # faces = faces[:, idx].contiguous()
+            idx = torch.arange(faces.shape[1]-1, -1, -1, device=faces.device)
+            faces = faces[:, idx]
             
-            # verts = verts.contiguous()
-            # faces = faces.contiguous()
+            verts = verts.contiguous()
+            faces = faces.contiguous()
             
             return verts, faces
         else:
@@ -247,11 +247,25 @@ class DMCSurfaceExtractor(SurfaceExtractor):
                     output_tetmesh=False,
                 )
             
+            # verts = center_vertices(verts).contiguous()  # 这里改变了 verts的值，也就是缩放了w 
+
             vertices = verts.detach().cpu().numpy()
             faces = faces.detach().cpu().numpy()[:, ::-1]
             
             return vertices, faces
 
+import cv2 as cv
+def save_debug_image(tensor, path, normalize=False):
+        arr = tensor.detach().cpu().numpy()
+        if normalize:
+            arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
+
+        if arr.ndim == 2:
+            arr = (arr * 255).astype(np.uint8)
+            cv.imwrite(path, arr)
+        else:
+            arr = (arr * 255).astype(np.uint8)
+            cv.imwrite(path, cv.cvtColor(arr, cv.COLOR_RGB2BGR))
 
 
 SurfaceExtractors = {

@@ -1,168 +1,123 @@
 import os
-import math
+if 'TORCH_CUDA_ARCH_LIST' not in os.environ:
+    os.environ['TORCH_CUDA_ARCH_LIST'] = '8.6'  # 根据您的GPU设置
+
 import torch
 import torch.nn.functional as F
+import math
 import nvdiffrast.torch as dr
-import trimesh
-import numpy as np
-import cv2 as cv
 
-# ===========================================================
-# 可微法线计算
-# ===========================================================
-def compute_vertex_normals(verts, faces_int32):
-    # ensure faces are long and contiguous
-    faces = faces_int32.long().contiguous()
-    v0 = verts[faces[:, 0]]
-    v1 = verts[faces[:, 1]]
-    v2 = verts[faces[:, 2]]
-    face_normals = torch.cross(v1 - v0, v2 - v0, dim=-1)
-    vert_normals = torch.zeros_like(verts)
-    for i in range(3):
-        vert_normals.index_add_(0, faces[:, i], face_normals)
-    vert_normals = F.normalize(vert_normals, dim=-1, eps=1e-8)
-    return vert_normals
+class DifferentiableRenderer:
+    """
+    A fully differentiable renderer with OpenGL-style projection.
+    Provides silhouette, normal, depth, and disparity maps.
+    """
 
-# ===========================================================
-# 可微相机投影 (OpenGL)
-# ===========================================================
-def camera_to_clip(verts_cam, Kp, near, far):
-    fxp, fyp = Kp[0, 0], Kp[1, 1]
-    cxp, cyp = Kp[0, 2], Kp[1, 2]
-    X, Y = verts_cam[:, 0], verts_cam[:, 1]
-    front_z = (-verts_cam[:, 2]).clamp(min=1e-6)
-    w = front_z
-    x_c = 2.0 * fxp * X + (2.0 * cxp - 1.0) * w
-    y_c = -2.0 * fyp * Y + (1.0 - 2.0 * cyp) * w
-    A = (far + near) / (far - near)
-    B = (-2.0 * near * far) / (far - near)
-    z_c = A * w + B
-    return torch.stack([x_c, y_c, z_c, w], dim=-1)
+    def __init__(self, device="cuda"):
+        self.device = device
+        self.ctx = dr.RasterizeGLContext(device=device)
 
-# ===========================================================
-# 可微渲染主函数（加了 contiguous 的保护）
-# ===========================================================
-def render_normals_disparity_silhouette_differentiable(
-    verts_cam, faces, Kp, H, W, near=None, far=None, smooth_mask=True, device="cuda"
-):
-    # move to device and ensure contiguous & proper dtypes
-    verts_cam = verts_cam.to(device).contiguous()
-    faces = faces.to(device).contiguous()
-    Kp = Kp.to(device).contiguous()
+    # ===========================================================
+    # 可微法线计算
+    # ===========================================================
+    def compute_vertex_normals(self, verts, faces_int32):
+        faces = faces_int32.long()
+        v0 = verts[faces[:, 0]]
+        v1 = verts[faces[:, 1]]
+        v2 = verts[faces[:, 2]]
+        face_normals = torch.cross(v1 - v0, v2 - v0, dim=-1)
+        vert_normals = torch.zeros_like(verts)
+        for i in range(3):
+            vert_normals.index_add_(0, faces[:, i], face_normals)
+        vert_normals = F.normalize(vert_normals, dim=-1, eps=1e-8)
+        return vert_normals
 
-    Z = verts_cam[:, 2]
-    front_z = (-Z).clamp(min=1e-6)
-    if near is None:
-        near = front_z.min() * 0.5
-    if far is None:
-        far = front_z.max() * 1.5
-    near, far = float(near), float(far)
+    # ===========================================================
+    # 可微相机投影 (OpenGL)
+    # ===========================================================
+    def camera_to_clip(self, verts_cam, Kp, near, far):
+        fxp, fyp = Kp[0, 0], Kp[1, 1]
+        cxp, cyp = Kp[0, 2], Kp[1, 2]
+        X, Y = verts_cam[:, 0], verts_cam[:, 1]
+        front_z = (-verts_cam[:, 2]).clamp(min=1e-6)
+        w = front_z
+        x_c = 2.0 * fxp * X + (2.0 * cxp - 1.0) * w
+        y_c = -2.0 * fyp * Y + (1.0 - 2.0 * cyp) * w
+        A = (far + near) / (far - near)
+        B = (-2.0 * near * far) / (far - near)
+        z_c = A * w + B
+        return torch.stack([x_c, y_c, z_c, w], dim=-1)
 
-    verts_clip = camera_to_clip(verts_cam, Kp, near, far).unsqueeze(0).contiguous()
-    # ensure float32 dtype for rasterize (nvdiffrast expects float32)
-    if verts_clip.dtype != torch.float32:
-        verts_clip = verts_clip.to(torch.float32)
+    # ===========================================================
+    # FOV -> 归一化内参
+    # ===========================================================
+    def fov_to_K_normalized(self, fov_x_deg, width, height):
+        fov_x = math.radians(fov_x_deg)
+        fxp = 1.0 / (2.0 * math.tan(fov_x / 2.0))
+        fyp = fxp * (width / height)
+        cxp, cyp = 0.5, 0.5
+        Kp = torch.tensor([[fxp, 0, cxp], [0, fyp, cyp], [0, 0, 1]], dtype=torch.float32)
+        return Kp.to(self.device)
 
-    ctx = dr.RasterizeGLContext(device=device)
-    rast, _ = dr.rasterize(ctx, verts_clip, faces, (H, W))
+    # ===========================================================
+    # 主渲染函数
+    # ===========================================================
+    def render_normals_disparity_silhouette(
+        self,
+        verts_cam,
+        faces,
+        Kp,
+        H,
+        W,
+        near=None,
+        far=None,
+        smooth_mask=True,
+    ):
+        device = self.device
+        verts_cam = verts_cam.to(device)
+        faces = faces.to(device)
+        Kp = Kp.to(device)
 
-    if smooth_mask:
-        sil = torch.sigmoid(500.0 * rast[..., 3:])
-    else:
-        sil = (rast[..., 3:] > 0).float()
+        # 深度裁剪
+        Z = verts_cam[:, 2]
+        front_z = (-Z).clamp(min=1e-6)
+        if near is None:
+            near = front_z.min() * 0.5
+        if far is None:
+            far = front_z.max() * 1.5
+        near, far = float(near), float(far)
 
-    vnorm = compute_vertex_normals(verts_cam, faces)  # 已在函数内保证 faces.contiguous()
-    inv_front_z = (1.0 / front_z).unsqueeze(-1)
-    attr = torch.cat([vnorm, inv_front_z], dim=-1)[None, ...].contiguous()  # also make attr contiguous
+        # 顶点投影到裁剪空间
+        verts_clip = self.camera_to_clip(verts_cam, Kp, near, far).unsqueeze(0)
+        rast, _ = dr.rasterize(self.ctx, verts_clip, faces, (H, W))
 
-    attr_img, _ = dr.interpolate(attr, rast, faces)
+        # silhouette
+        if smooth_mask:
+            sil = torch.sigmoid(500.0 * rast[..., 3:])
+        else:
+            sil = (rast[..., 3:] > 0).float()
 
-    n_img = F.normalize(attr_img[..., :3], dim=-1, eps=1e-8)
-    inv_depth = torch.maximum(attr_img[..., 3:4], torch.tensor(1e-8, device=device))
-    depth = 1.0 / inv_depth
-    disparity = inv_depth
+        # 顶点属性：法线 + 逆深度
+        vnorm = self.compute_vertex_normals(verts_cam, faces)
+        inv_front_z = (1.0 / front_z).unsqueeze(-1)
+        attr = torch.cat([vnorm, inv_front_z], dim=-1)[None, ...]
 
-    n_vis = (n_img * 0.5 + 0.5) * sil
-    depth = depth * sil
-    disparity = disparity * sil
+        # 插值到像素
+        attr_img, _ = dr.interpolate(attr, rast, faces)
+        n_img = F.normalize(attr_img[..., :3], dim=-1, eps=1e-8)
+        inv_depth = torch.maximum(attr_img[..., 3:4], torch.tensor(1e-8, device=device))
+        depth = 1.0 / inv_depth
+        disparity = inv_depth
 
-    return {
-        "silhouette": sil[0],
-        "depth": depth[0],
-        "disparity": disparity[0],
-        "normal_rgb": n_vis[0],
-        "normal_cam": n_img[0],
-        "near_far": (near, far),
-    }
+        n_vis = (n_img * 0.5 + 0.5) * sil
+        depth = depth * sil
+        disparity = disparity * sil
 
-# ===========================================================
-# FOV -> 归一化内参
-# ===========================================================
-def fov_to_K_normalized(fov_x_deg, width, height):
-    fov_x = math.radians(fov_x_deg)
-    fxp = 1.0 / (2.0 * math.tan(fov_x / 2.0))
-    fyp = fxp * (width / height)
-    cxp, cyp = 0.5, 0.5
-    Kp = torch.tensor([[fxp, 0, cxp], [0, fyp, cyp], [0, 0, 1]], dtype=torch.float32)
-    return Kp
-
-
-# ===========================================================
-# 可视化辅助函数 (不破坏计算图)
-# ===========================================================
-def visualize_outputs(outputs, step, save_dir="./debug"):
-    os.makedirs(save_dir, exist_ok=True)
-    with torch.no_grad():
-        depth = outputs["depth"].detach().cpu().numpy()
-        disp = outputs["disparity"].detach().cpu().numpy()
-        normal_rgb = outputs["normal_rgb"].detach().cpu().numpy()
-        sil = outputs["silhouette"].detach().cpu().numpy()
-        near, far = outputs["near_far"]
-
-        depth_vis = np.clip((depth - near) / (far - near), 0.0, 1.0)
-        depth_vis_u8 = (depth_vis[..., 0] * 255.0).astype(np.uint8)
-        depth_color = cv.applyColorMap(depth_vis_u8, cv.COLORMAP_VIRIDIS)
-        cv.imwrite(f"{save_dir}/depth_{step:04d}.png", depth_color)
-
-        if disp.max() > 0:
-            disp_vis = (disp / (disp.max() + 1e-8))[..., 0]
-            cv.imwrite(f"{save_dir}/disp_{step:04d}.png", (disp_vis * 255).astype(np.uint8))
-
-        cv.imwrite(f"{save_dir}/normal_{step:04d}.png", (normal_rgb * 255).astype(np.uint8))
-        cv.imwrite(f"{save_dir}/sil_{step:04d}.png", (sil[..., 0] * 255).astype(np.uint8))
-
-# ===========================================================
-# 示例：可微优化 + 可视化
-# ===========================================================
-if __name__ == "__main__":
-    mesh = trimesh.load("/home/haiming.zhu/HOI/score2.1/hunyuan_registered.glb", process=False)
-    if isinstance(mesh, trimesh.Scene):
-        mesh = trimesh.util.concatenate(mesh.dump())
-    verts = torch.from_numpy(mesh.vertices).float().cuda()
-    faces = torch.from_numpy(mesh.faces).int().cuda()
-    verts.requires_grad_(True)
-
-    H, W = 224, 224
-    fovx = 41.0
-    Kp = fov_to_K_normalized(fovx, W, H).cuda()
-    optimizer = torch.optim.Adam([verts], lr=1e-3)
-
-    for step in range(0, 100):
-        optimizer.zero_grad()
-
-        outputs = render_normals_disparity_silhouette_differentiable(
-            verts, faces, Kp, H, W, smooth_mask=True, device="cuda"
-        )
-
-        # example: 深度约束损失（鼓励平滑）
-        loss_depth = outputs["depth"].mean()
-        loss_normal = (1 - outputs["normal_rgb"].mean())
-        loss = loss_depth + 0.1 * loss_normal
-        loss.backward()
-        optimizer.step()
-
-        print(f"[Step {step}] Loss={loss.item():.6f}, grad_norm={verts.grad.norm().item():.6f}")
-
-        # 每隔几步保存可视化
-        if step % 10 == 0:
-            visualize_outputs(outputs, step)
+        return {
+            "silhouette": sil[0],
+            "depth": depth[0],
+            "disparity": disparity[0],
+            "normal_rgb": n_vis[0],
+            "normal_cam": n_img[0],
+            "near_far": (near, far),
+        }

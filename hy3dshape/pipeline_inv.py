@@ -128,15 +128,194 @@ class HunyuanInversion:
 
     def __init__(self, pipeline):
         # 共享 pipeline 的组件
-        self.model = pipeline.model
-        self.vae = pipeline.vae
         self.device = pipeline.device
         self.dtype = pipeline.dtype
+        self.model = pipeline.model
+        self.vae = pipeline.vae
         self.image_processor = pipeline.image_processor
         self.set_surface_extractor = pipeline.set_surface_extractor
 
+        self.scheduler = pipeline.scheduler
+        self._export = pipeline._export
+
         # inversion 专用 scheduler
         self.inv_scheduler = UniInvEulerScheduler(num_train_timesteps=1000)
+
+    def __call__(self, latents, cond_ref, cond_hand,
+                timesteps, 
+                do_classifier_free_guidance, guidance_scale,  
+                guidance,
+                mesh_path,
+                moge_path,
+                moge_hand_path,
+                num_inference_steps,
+                sigmas,
+                eta,
+                generator,
+                box_v,
+                octree_resolution,
+                mc_level,
+                mc_algo,
+                num_chunks,
+                output_type,
+                enable_pbar=True):
+            
+        phase1_scheduler = copy.deepcopy(self.scheduler)  # pipeline 的 scheduler
+        timesteps_phase1 = timesteps
+        
+        with synchronize_timer('Phase 1: Partial Sampling + Inversion'):
+            pbar = tqdm(timesteps_phase1, disable=not enable_pbar, desc="(Phase 1) Partial Sampling + Inversion:")
+            for i, t in enumerate(pbar):
+                if do_classifier_free_guidance:
+                    latent_model_input = torch.cat([latents] * 2)
+                else:
+                    latent_model_input = latents
+
+                timestep = t.expand(latent_model_input.shape[0]).to(latents.dtype)
+                timestep = timestep / phase1_scheduler.config.num_train_timesteps
+                
+                noise_pred = self.model(latent_model_input, timestep, cond_ref, guidance=guidance)
+
+                if do_classifier_free_guidance:
+                    noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+                outputs = phase1_scheduler.step(noise_pred, t, latents)
+                latents = outputs.prev_sample
+
+                if i == 9 or i == num_inference_steps - 1:
+                    pbar.close()
+                    
+                    # 导出中间 mesh
+                    mesh_i = self._export(
+                        outputs.pred_original_sample,
+                        box_v=box_v,
+                        mc_level=mc_level,
+                        num_chunks=num_chunks,
+                        octree_resolution=octree_resolution,
+                        mc_algo='dmc',   # NOTE: 使用mc + norm, 以配准到cube的hunyuna空间
+                        enable_pbar=enable_pbar,
+                    )
+
+                    # 可视化。 这里的mesh 是在 hunyuan 生成空间下的mesh
+                    if enable_pbar:
+                        print(f"[Phase 1] Exporting intermediate mesh at step {i+1}")
+                        dir = "vis_phase1_mid_mesh"
+                        os.makedirs(dir, exist_ok=True)
+                        import time
+                        if isinstance(mesh_i, list):
+                            for midx, m in enumerate(mesh_i):
+                                m.export(f"{dir}/check_step10_{midx}_{time.time()}.glb")
+                        else:
+                            mesh_i.export(f"{dir}/check_step10_{time.time()}.glb")
+
+                    # # Registration
+                    logger.info(f"[Phase 1] Start registration + inversion...")
+                    Th, To = self.registration(
+                        hunyuan_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
+                        hamer_mesh=mesh_path,
+                        moge_pointmap=moge_path,
+                        moge_hand_pointmap=moge_hand_path
+                    )
+
+                    # Inversion
+                    inversion = True if mesh_path is not None else False
+                    latents = self.inversion(
+                        mesh_path=mesh_path,
+                        Th=Th,
+                        To=To,
+                        device=self.device,
+                        batch_size=1,
+                        inversion=inversion,
+                        box_v=box_v,
+                        octree_resolution=octree_resolution,
+                        mc_level=mc_level,
+                        num_chunks=num_chunks,
+                        mc_algo='mc',   # 需要使用mc，查看 inverison 的hunyuan mesh在哪
+                        enable_pbar=enable_pbar,
+                        cond=cond_hand,
+                        num_inference_steps=num_inference_steps,
+                        timesteps=timesteps,
+                        do_classifier_free_guidance=do_classifier_free_guidance,
+                        guidance_scale=guidance_scale,
+                        generator=generator,
+                    )
+                    
+                    del outputs, mesh_i, phase1_scheduler, Th
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    break
+                
+        return latents, To
+
+    # ===============================
+    #        FULL INVERSION API
+    # ===============================
+    def inversion(
+        self,
+        mesh_path: Union[str, List[str]],
+        Th: np.ndarray,
+        To: np.ndarray,
+        device: torch.device,
+        batch_size: int = 1,
+        inversion: bool = True,
+        box_v=1.01,
+        octree_resolution=256,
+        mc_level=-1 / 512,
+        num_chunks=8000,
+        mc_algo=None,
+        enable_pbar=True,
+        cond: torch.FloatTensor = None,
+        num_inference_steps: int = 20,
+        timesteps: List[int] = None,
+        do_classifier_free_guidance: bool = True,
+        guidance_scale: float = 5.0,
+        generator=None,
+    ) -> torch.FloatTensor:
+
+        assert Th.shape == (4, 4) and To.shape == (4, 4)
+
+        if inversion:
+            surface = loader(mesh_path, Th, To).to(self.device, dtype=self.dtype)   # 这里hand mesh得配准到hunyuan的norm空间下，不下vae是错误的
+            latents = self.vae.encode(surface)
+            latents = self.vae.scale_factor * latents
+
+            # test decode
+            vis_test_decoding = True # 奇怪的是，这里配准完了，再重建。也不能返回 Hunyuan的空间，除非有norm. 也就是说vae本身是缩放的
+            if vis_test_decoding:
+                import time
+                mesh = self._export(
+                        latents.detach(),
+                        box_v=box_v,
+                        mc_level=mc_level,
+                        num_chunks=num_chunks,
+                        octree_resolution=octree_resolution,
+                        mc_algo='mc',   # NOTE: 使用mc + norm, 以配准到cube的hunyuna空间
+                        enable_pbar=enable_pbar,
+                    )
+                if isinstance(mesh, list):
+                    for mid, m in enumerate(mesh):
+                        m.export(f"check_hand_flexicube_{mid}_{time.time()}.glb")
+                else:
+                    mesh.export(f"check_hand_{time.time()}.glb")
+
+                # del latents_rec, outputs, mesh
+                # torch.cuda.empty_cache()
+
+            latents = self.inversion_loop(
+                latents,
+                cond,
+                device=device,
+                inversion_steps=num_inference_steps,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+                guidance_scale=1.0,
+                timesteps=timesteps,
+            )
+
+        else:
+            latents = self.pipeline.prepare_latents(batch_size, self.dtype, device, generator)
+
+        return latents
 
     # ===============================
     #          INVERSION LOOP
@@ -195,80 +374,6 @@ class HunyuanInversion:
 
         return latents
 
-    # ===============================
-    #        FULL INVERSION API
-    # ===============================
-    def inversion(
-        self,
-        mesh_path: Union[str, List[str]],
-        Th: np.ndarray,
-        To: np.ndarray,
-        device: torch.device,
-        batch_size: int = 1,
-        inversion: bool = True,
-        box_v=1.01,
-        octree_resolution=256,
-        mc_level=-1 / 512,
-        num_chunks=8000,
-        mc_algo=None,
-        enable_pbar=True,
-        cond: torch.FloatTensor = None,
-        num_inference_steps: int = 20,
-        timesteps: List[int] = None,
-        do_classifier_free_guidance: bool = True,
-        guidance_scale: float = 5.0,
-        generator=None,
-    ) -> torch.FloatTensor:
-
-        assert Th.shape == (4, 4) and To.shape == (4, 4)
-
-        if inversion:
-            # mesh_path = '/home/haiming.zhu/HOI/score2.1/hunyuan_registered.glb'
-            surface = loader(mesh_path, Th, To).to(self.device, dtype=self.dtype)   # 这里hand mesh被配准到hunyuan生成的mesh空间
-            # surface = loader(mesh_path).to(self.device, dtype=self.dtype)
-            latents = self.vae.encode(surface)
-            latents = self.vae.scale_factor * latents
-
-            # test decode
-            vis_test_decoding = True
-            if vis_test_decoding:
-                import time
-                self.set_surface_extractor(mc_algo)
-                latents_rec = 1. / self.vae.scale_factor * latents.clone().detach()
-                latents_rec = self.vae(latents_rec)
-                outputs = self.vae.latents2mesh(
-                    latents_rec,
-                    bounds=box_v,
-                    mc_level=mc_level,
-                    num_chunks=num_chunks,
-                    octree_resolution=octree_resolution,
-                    mc_algo=mc_algo,    
-                    enable_pbar=enable_pbar,
-                )
-                mesh = export_to_trimesh(outputs)
-                if isinstance(mesh, list):
-                    for mid, m in enumerate(mesh):
-                        m.export(f"check_hand_flexicube_{mid}_{time.time()}.glb")
-                else:
-                    mesh.export(f"check_hand_{time.time()}.glb")
-
-                # del latents_rec, outputs, mesh
-                # torch.cuda.empty_cache()
-
-            latents = self.inversion_loop(
-                latents,
-                cond,
-                device=device,
-                inversion_steps=num_inference_steps,
-                do_classifier_free_guidance=do_classifier_free_guidance,
-                guidance_scale=1.0,
-                timesteps=timesteps,
-            )
-
-        else:
-            latents = self.pipeline.prepare_latents(batch_size, self.dtype, device, generator)
-
-        return latents
 
     # ===============================
     #          REGISTRATION

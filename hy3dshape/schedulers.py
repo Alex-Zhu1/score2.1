@@ -125,12 +125,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         # initialize renderer for 2D guidance
         self.renderer = None
 
-        def _init_renderer(self):
-            """Lazy initialization of differentiable renderer."""
-            if self.renderer is None and NVDIFFRAST_AVAILABLE:
-                self.renderer = DifferentiableRenderer()
-            return self.renderer
-
     @property
     def step_index(self):
         """
@@ -396,7 +390,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         if not hasattr(self, "renderer") or self.renderer is None:
             self.renderer = DifferentiableRenderer(device=device)
 
-        Kp = self.renderer.fov_to_K_normalized(fov_x, width, height)
+        Kp = self.renderer.fov_to_K_normalized(fov_x, width, height).to(device)
 
         # === Optimizable Parameters ===
         para_velocity = torch.nn.Parameter(model_output.clone().to(device).to(torch.float32).detach())  # same shape as model_output
@@ -464,10 +458,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                 )
 
             vertices, faces = outputs[0]
-            faces = faces.to(torch.int32).contiguous()
+            faces = faces.to(torch.int32)
 
             # Apply transformation, 利用To转化到pointsmap坐标系, 再利用transform做posed
-            # ensure To is a tensor on the correct device/dtype
             if not isinstance(To, torch.Tensor):
                 To = torch.as_tensor(To, device=device, dtype=torch.float32)
 
@@ -491,6 +484,8 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                     v_vis = v_vis.astype(np.float32)
                     trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
 
+            # idx = torch.arange(faces.shape[1]-1, -1, -1, device=faces.device)
+            # faces = faces[:, idx]
             # Render
             render_out = self.renderer.render_normals_disparity_silhouette(
                 verts_cam=vertices_transformed, faces=faces, Kp=Kp, H=height, W=width
@@ -519,21 +514,6 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                     + weight_reg_trans * loss_reg_trans
                     + weight_reg_rot * loss_reg_rot
                 )
-            
-            # === Backprop ===
-            def debug_contiguity(name, t):
-                if not isinstance(t, torch.Tensor):
-                    print(f"{name}: not a tensor")
-                    return
-                print(f"{name}: dtype={t.dtype} device={t.device} shape={tuple(t.shape)} is_contiguous={t.is_contiguous()} requires_grad={t.requires_grad}")
-
-            # 在 loss.backward() 前调用（用你实际的变量名替换）
-            # 假设 verts, faces 是 DMCSurfaceExtractor.run 返回并最终进入 diso 的张量
-            debug_contiguity("verts", vertices_transformed)
-            debug_contiguity("faces", faces)
-            # 如果你还有 attr / deform / adj_verts（或其他传入 diso 的中间变量），也打印一遍
-
-
 
             loss.backward()
 
