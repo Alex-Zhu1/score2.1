@@ -135,38 +135,152 @@ def visualize_outputs(outputs, step, save_dir="./debug"):
         cv.imwrite(f"{save_dir}/normal_{step:04d}.png", (normal_rgb * 255).astype(np.uint8))
         cv.imwrite(f"{save_dir}/sil_{step:04d}.png", (sil[..., 0] * 255).astype(np.uint8))
 
+def loss_norm(pred_normal, gt_normal, mask=None, eps=1e-6):
+    # --- Normalize both predicted and GT normals ---
+    pred = F.normalize(pred_normal, dim=1, eps=eps)
+    gt = F.normalize(gt_normal, dim=1, eps=eps)
+
+    # --- Dot product for normal alignment ---
+    dot = torch.sum(pred * gt, dim=1, keepdim=True)  # [B,1,H,W]
+
+    # Clamp to avoid invalid values (optional safety)
+    dot = dot.clamp(-1.0, 1.0)
+
+    # loss = 1 - cos similarity
+    loss_map = 1.0 - dot
+
+    # Apply mask if provided
+    if mask is not None:
+        loss_map = loss_map * mask
+        return loss_map.sum() / (mask.sum() + eps)
+    else:
+        return loss_map.mean()
 # ===========================================================
-# 示例：可微优化 + 可视化
+# 示例：可微优化 + 可视化 + 应用 T_final 导出 mesh
 # ===========================================================
 if __name__ == "__main__":
-    mesh = trimesh.load("/home/haiming.zhu/HOI/score2.1/hunyuan_registered.glb", process=False)
+    # -----------------------------
+    # 1. 加载 mesh
+    # -----------------------------
+    mesh = trimesh.load("/home/haiming.zhu/HOI/score2.1/hand_registered.glb", process=False)
     if isinstance(mesh, trimesh.Scene):
         mesh = trimesh.util.concatenate(mesh.dump())
     verts = torch.from_numpy(mesh.vertices).float().cuda()
     faces = torch.from_numpy(mesh.faces).int().cuda()
-    verts.requires_grad_(True)
+    verts.requires_grad_(False)  # 顶点固定，不优化
 
     H, W = 224, 224
     fovx = 41.0
     Kp = fov_to_K_normalized(fovx, W, H).cuda()
-    optimizer = torch.optim.Adam([verts], lr=1e-3)
+    device = "cuda"
 
-    for step in range(0, 100):
+    # -----------------------------
+    # 2. 构建优化参数（旋转+缩放+平移）
+    # -----------------------------
+    rotvec = torch.nn.Parameter(torch.zeros(3, device=device))
+    scale = torch.nn.Parameter(torch.ones(3, device=device))
+    translation = torch.nn.Parameter(torch.zeros(3, device=device))
+
+    lr_scale = 1e-4
+    lr_rotation = 5e-4
+    lr_translation = 1e-4
+
+    optimizer = torch.optim.Adam([
+            {'params': [scale], 'lr': lr_scale},
+            {'params': [rotvec], 'lr': lr_rotation},
+            {'params': [translation], 'lr': lr_translation},
+        ])
+
+    # -----------------------------
+    # 3. 可微 Rodrigues 构建矩阵
+    # -----------------------------
+    def build_transform_matrix_axis_angle(scale, rotvec, translation):
+        angle = torch.linalg.norm(rotvec)
+        device = rotvec.device
+        dtype = rotvec.dtype
+
+        if angle < 1e-8:
+            R = torch.eye(3, device=device, dtype=dtype)
+        else:
+            axis = rotvec / angle
+            K = torch.zeros((3, 3), device=device, dtype=dtype)
+            K[0, 1] = -axis[2]; K[0, 2] =  axis[1]
+            K[1, 0] =  axis[2]; K[1, 2] = -axis[0]
+            K[2, 0] = -axis[1]; K[2, 1] =  axis[0]
+            R = torch.eye(3, device=device, dtype=dtype) + torch.sin(angle) * K + (1 - torch.cos(angle)) * (K @ K)
+
+        S = torch.diag(scale)
+        transform = torch.eye(4, device=device, dtype=dtype)
+        transform[:3, :3] = S @ R
+        transform[:3, 3] = translation
+        return transform
+
+    # -----------------------------
+    # 4. 加载参考图像
+    # -----------------------------
+    
+    ref_dir = "/home/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_hand_depth/325_cropped_hoi_1"
+
+    ref_normal = cv.imread(f"{ref_dir}/rendered_normal.png", cv.IMREAD_COLOR)
+    ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    ref_normal = ref_normal * 2.0 - 1.0  # [-1,1]
+    ref_normal = torch.from_numpy(ref_normal).to(device)  # 1 x H x W x 3
+
+    ref_silhouette = cv.imread(f"{ref_dir}/rendered_silhouette.png", cv.IMREAD_GRAYSCALE)
+    ref_silhouette = (ref_silhouette.astype(np.float32) / 255.0)
+    ref_silhouette = torch.from_numpy(ref_silhouette).to(device)  #
+
+    ref_disparity = cv.imread(f"{ref_dir}/rendered_disparity.png", cv.IMREAD_GRAYSCALE)
+    ref_disparity = (ref_disparity.astype(np.float32) / 255.0)
+    ref_disparity = torch.from_numpy(ref_disparity).to(device)  #
+
+    # -----------------------------
+    # 5. 优化循环
+    # -----------------------------
+    for step in range(100):
         optimizer.zero_grad()
+        T = build_transform_matrix_axis_angle(scale, rotvec, translation)
+        verts_h = torch.cat([verts, torch.ones_like(verts[:, :1])], dim=-1)
+        verts_cam = (T @ verts_h.T).T[:, :3]
 
         outputs = render_normals_disparity_silhouette_differentiable(
-            verts, faces, Kp, H, W, smooth_mask=True, device="cuda"
+            verts_cam, faces, Kp, H, W, smooth_mask=True, device=device
         )
 
-        # example: 深度约束损失（鼓励平滑）
-        loss_depth = outputs["depth"].mean()
-        loss_normal = (1 - outputs["normal_rgb"].mean())
-        loss = loss_depth + 0.1 * loss_normal
+        if step % 10 == 0:
+            visualize_outputs(outputs, step)
+
+        normal_map = outputs["normal_cam"]
+        alpha_map = outputs["silhouette"][..., 0]
+        disp_map = outputs["disparity"][..., 0]
+
+        loss_normal = loss_norm(normal_map.permute(2,0,1).unsqueeze(0), ref_normal.permute(2,0,1).unsqueeze(0))
+        # loss_sil = F.mse_loss(alpha_map, ref_silhouette)
+        loss_sil = F.binary_cross_entropy(alpha_map, ref_silhouette)
+        loss_disp = F.l1_loss(disp_map, ref_disparity)
+
+        loss = 0.1 * loss_normal + 0.5 *loss_sil  + 0.5 * loss_disp
+        print(f"Step {step}: Loss Normal={loss_normal.item():.6f}, Loss Silhouette={loss_sil.item():.6f}, Loss Disparity={loss_disp.item():.6f}, Total Loss={loss.item():.6f}")
+
         loss.backward()
         optimizer.step()
 
-        print(f"[Step {step}] Loss={loss.item():.6f}, grad_norm={verts.grad.norm().item():.6f}")
-
-        # 每隔几步保存可视化
         if step % 10 == 0:
+            print(f"[Step {step}] Loss={loss.item():.6f}")
             visualize_outputs(outputs, step)
+
+    # -----------------------------
+    # 6. 输出最终矩阵
+    # -----------------------------
+    T_final = build_transform_matrix_axis_angle(scale, rotvec, translation)
+    print("Optimized T:\n", T_final.detach().cpu().numpy())
+
+    # -----------------------------
+    # 7. 应用 T_final 到 mesh 并导出
+    # -----------------------------
+    verts_h = torch.cat([verts, torch.ones_like(verts[:, :1])], dim=-1)
+    verts_transformed = (T_final @ verts_h.T).T[:, :3].detach().cpu().numpy()
+
+    mesh_transformed = trimesh.Trimesh(vertices=verts_transformed, faces=mesh.faces)
+    mesh_transformed.export("./hunyuan_registered_transformed.glb")
+    print("Saved transformed mesh to ./hunyuan_registered_transformed.glb")

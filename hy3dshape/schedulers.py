@@ -375,9 +375,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         lr_rotation = config.get("lr_rotation", 5e-4)
         lr_translation = config.get("lr_translation", 5e-4 )
 
-        weight_norm = config.get("weight_norm", 10.0)
+        weight_norm = config.get("weight_norm", 1.0)
         weight_sil = config.get("weight_sil", 10.0)
-        weight_disp = config.get("weight_disp", 10.0)        
+        weight_disp = config.get("weight_disp", 1.0)        
         weight_reg_scale = config.get("weight_reg_scale", 1e-5)
         weight_reg_trans = config.get("weight_reg_trans", 1e-5)
         weight_reg_rot = config.get("weight_reg_rot", 1e-5)
@@ -452,6 +452,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                     x1.to(original_dtype),
                     output_type="mesh",
                     mc_algo="dmc",
+                    num_chunks=2000,
                     enable_pbar=False,
                     requires_grad=True,
                     use_checkpoint=True
@@ -471,18 +472,18 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             vertices_homo = (vertices_homo @ To.T)  @ transform.T
             vertices_transformed = vertices_homo[:, :3] / vertices_homo[:, 3:4]
 
-            if step % 5 == 0:
-                with torch.no_grad():
-                    import os
-                    debug_dir = "./debug_2d_guidance"
-                    if not os.path.exists(debug_dir):
-                        os.makedirs(debug_dir, exist_ok=True)
-                    v_vis = vertices_transformed.clone().detach().cpu().numpy()
-                    f_vis = faces.clone().detach().cpu().numpy()
-                    # 如果你的渲染器是逆时针为正，且画面全黑，试试反转：
-                    f_vis = np.ascontiguousarray(f_vis)[:, ::-1]
-                    v_vis = v_vis.astype(np.float32)
-                    trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
+            # if step % 5 == 0:
+            #     with torch.no_grad():
+            #         import os
+            #         debug_dir = "./debug_2d_guidance"
+            #         if not os.path.exists(debug_dir):
+            #             os.makedirs(debug_dir, exist_ok=True)
+            #         v_vis = vertices_transformed.clone().detach().cpu().numpy()
+            #         f_vis = faces.clone().detach().cpu().numpy()
+            #         # 如果你的渲染器是逆时针为正，且画面全黑，试试反转：
+            #         f_vis = np.ascontiguousarray(f_vis)[:, ::-1]
+            #         v_vis = v_vis.astype(np.float32)
+            #         trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
 
             # idx = torch.arange(faces.shape[1]-1, -1, -1, device=faces.device)
             # faces = faces[:, idx]
@@ -555,33 +556,31 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         
     def build_transform_matrix_axis_angle(self, scale, rotvec, translation):
         angle = torch.linalg.norm(rotvec)
+        device = rotvec.device
+        dtype = rotvec.dtype
+
         if angle < 1e-8:
-            R = torch.eye(3, device=rotvec.device)
+            R = torch.eye(3, device=device, dtype=dtype)
         else:
             axis = rotvec / angle
+            # skew-symmetric matrix for Rodrigues, 完全可微
+            K = torch.zeros((3, 3), device=device, dtype=dtype)
+            K[0, 1] = -axis[2]; K[0, 2] =  axis[1]
+            K[1, 0] =  axis[2]; K[1, 2] = -axis[0]
+            K[2, 0] = -axis[1]; K[2, 1] =  axis[0]
 
-            # skew-symmetric matrix for Rodrigues
-            K = torch.tensor([
-                [0, -axis[2], axis[1]],
-                [axis[2], 0, -axis[0]],
-                [-axis[1], axis[0], 0]
-            ], device=rotvec.device)
-
-            R = (
-                torch.eye(3, device=rotvec.device)
-                + torch.sin(angle) * K
-                + (1 - torch.cos(angle)) * (K @ K)
-            )
+            R = torch.eye(3, device=device, dtype=dtype) + torch.sin(angle) * K + (1 - torch.cos(angle)) * (K @ K)
 
         # scale matrix
         S = torch.diag(scale)
 
-        # S @ R composition
-        transform = torch.eye(4, device=scale.device)
+        # S @ R
+        transform = torch.eye(4, device=device, dtype=dtype)
         transform[:3, :3] = S @ R
         transform[:3, 3] = translation
 
         return transform
+
     
 
     def loss_norm(self, pred_normal, gt_normal, mask=None, eps=1e-6):

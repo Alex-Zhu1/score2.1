@@ -148,7 +148,7 @@ def load_surface_sharpegde(mesh, num_points=4096, num_sharp_points=4096, sharped
     except Exception as err:
         mesh_full = trimesh.util.concatenate(mesh)
 
-    # mesh_full = normalize_mesh(mesh_full)   # 一定不要中心化，因为配准已经位置对齐
+    # mesh_full = normalize_mesh(mesh_full)   # 一定不要中心化，因为配准已经位置对齐到hunyuan3D的标准空间，符合vae的输入
 
     origin_num = mesh_full.faces.shape[0]
     original_vertices = mesh_full.vertices
@@ -224,7 +224,7 @@ class SharpEdgeSurfaceLoader:
 
         mesh = mesh_or_mesh_path
         if isinstance(mesh, str):
-            mesh = trimesh.load(mesh, force="mesh", merge_primitives=True)
+            mesh = trimesh.load(mesh, force="mesh", merge_primitives=True, process=False)  # 这里process=False 很重要
         if isinstance(mesh, trimesh.scene.Scene):
             for idx, obj in enumerate(mesh.geometry.values()):
                 if idx == 0:
@@ -235,28 +235,37 @@ class SharpEdgeSurfaceLoader:
             
         # mesh加载的Harme的空间，首先转化到 MoGe的image aligned space,然后转化到Hunyuan3D的标准空间
         # === 坐标变换矩阵 ===
-        # Th = np.array([
-        #     [ 1.40274987, -0.05992133, -0.44449514, -2.89761218],
-        #     [ 0.1245076 ,  1.45416824,  0.19689151,  1.26634568],
-        #     [ 0.43088787, -0.2251174 ,  1.3901552 ,  8.24536719],
-        #     [ 0.        ,  0.        ,  0.        ,  1.        ]
+        Th = np.array([
+            [ 1.40274987, -0.05992133, -0.44449514, -2.89761218],
+            [ 0.1245076 ,  1.45416824,  0.19689151,  1.26634568],
+            [ 0.43088787, -0.2251174 ,  1.3901552 ,  8.24536719],
+            [ 0.        ,  0.        ,  0.        ,  1.        ]
+        ])
+
+        To = np.array([
+            [ 0.33563303, -0.0569792 ,  0.13968643, -0.01187149],
+            [ 0.15039468,  0.1531337 , -0.29889793,  0.02222771],
+            [-0.01184779,  0.32971488,  0.1629607 , -0.90017929],
+            [ 0.        ,  0.        ,  0.        ,  1.        ]
+        ])
+
+        # Too = np.array([
+        #     [0.9903009,  0.,         0.,        -0.00431565],
+        #     [0.,         1.0104604,  0.,        -0.00302778],
+        #     [0.,         0.,         1.0097432, -0.00974535],
+        #     [0.,         0.,         0.,         1.        ]
         # ])
 
-        # To = np.array([
-        #     [ 0.33563303, -0.0569792 ,  0.13968643, -0.01187149],
-        #     [ 0.15039468,  0.1531337 , -0.29889793,  0.02222771],
-        #     [-0.01184779,  0.32971488,  0.1629607 , -0.90017929],
-        #     [ 0.        ,  0.        ,  0.        ,  1.        ]
-        # ])
-
-        # === 应用变换 ===
+# === 应用变换 ===
 
         if Th is not None and To is not None:
-            # Harme -> MoGe (Th)
             mesh.apply_transform(Th)
-            # MoGe -> Hunyuan3D (To 的逆)
-            mesh.apply_transform(np.linalg.inv(To))
+            copy.deepcopy(mesh).export("Hamer_transform_to_pointmap.glb")
 
+            # mesh.apply_transform(Too)
+            # copy.deepcopy(mesh).export("Hamer_transform_to_MoGe_image_aligned.glb")
+            
+            mesh.apply_transform(np.linalg.inv(To))
             copy.deepcopy(mesh).export("Hamer_final_transform_to_Hunyuan3D.glb")
 
         surface, mesh = load_surface_sharpegde(mesh, num_points=num_uniform_points, num_sharp_points=num_sharp_points)

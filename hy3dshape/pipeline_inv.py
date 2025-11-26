@@ -18,11 +18,11 @@ from tqdm import tqdm
 # from .models.autoencoders import SurfaceExtractors
 from .utils import logger, synchronize_timer
 
-
-
-from .module.mesh_align_fun import align_meshes
 from .schedulers import UniInvEulerScheduler
 from .surface_loaders import SharpEdgeSurfaceLoader
+
+from .module.mesh_align_fun_bbaa import align_meshes
+from .module.mesh_align_fun_rms import align_meshes_rms
 
 loader = SharpEdgeSurfaceLoader(
     num_sharp_points=0,
@@ -193,11 +193,10 @@ class HunyuanInversion:
                         mc_level=mc_level,
                         num_chunks=num_chunks,
                         octree_resolution=octree_resolution,
-                        mc_algo='mc',   # NOTE: 使用mc + norm, 以配准到cube的hunyuna空间
+                        mc_algo='mc',   # NOTE: 第一次sampling,必须使用mc + norm, 以输出到cube的空间。这里才能让mesh输入到 vae中
                         enable_pbar=enable_pbar,
                     )
 
-                    # 可视化。 这里的mesh 是在 hunyuan 生成空间下的mesh
                     if enable_pbar:
                         print(f"[Phase 1] Exporting intermediate mesh at step {i+1}")
                         dir = "vis_phase1_mid_mesh"
@@ -210,6 +209,7 @@ class HunyuanInversion:
                             mesh_i.export(f"{dir}/check_step10_{time.time()}.glb")
 
                     # # Registration
+                    # NOTE: Trimesh那一步肯定缩放了，直接mesh_i传进去，配准结果是对齐的。但是trimesh会改变mesh scale
                     logger.info(f"[Phase 1] Start registration + inversion...")
                     Th, To = self.registration(
                         hunyuan_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
@@ -276,11 +276,11 @@ class HunyuanInversion:
         assert Th.shape == (4, 4) and To.shape == (4, 4)
 
         if inversion:
-            surface = loader(mesh_path, Th, To).to(self.device, dtype=self.dtype)   # 这里hand mesh得配准到hunyuan的norm空间下，不下vae是错误的
+            surface = loader(mesh_path, Th, To).to(self.device, dtype=self.dtype)   # 这里hand mesh得配准到hunyuan的norm空间下，不下vae是错误的。现在问题出现再这，这里的配准To是错误的。但是inverison不对
             latents = self.vae.encode(surface)
             latents = self.vae.scale_factor * latents
 
-            # test decode
+            # test decode   # 基本上，现在要处理的是，为什么encode decode出的结果和 第一次sampling的mesh对齐不行
             vis_test_decoding = True
             if vis_test_decoding:
                 import time
@@ -290,7 +290,7 @@ class HunyuanInversion:
                         mc_level=mc_level,
                         num_chunks=num_chunks,
                         octree_resolution=octree_resolution,
-                        mc_algo='dmc',   # NOTE: 这里可以测试dmc的space
+                        mc_algo='dmc',   # NOTE: 注意dmc输出是不 norm的。Flexicube是norm的，结果和Hamer_final_transform_to_Hunyuan3D.glb是一样的
                         enable_pbar=enable_pbar,
                     )
                 if isinstance(mesh, list):
@@ -380,22 +380,49 @@ class HunyuanInversion:
     # ===============================
     def registration(self, hunyuan_mesh, hamer_mesh, moge_pointmap, moge_hand_pointmap):
 
-        # Th, from hamer hand mesh to Moge pointmap
+        # Th, from hamer hand mesh to Moge pointmap. 问题现在就在这，由于质心，导致 hamer的hand 太大. 这里已经差不多ok啦
         Th = align_meshes(
             source_mesh_path=hamer_mesh,
             target_mesh_path=moge_hand_pointmap,
-            skip_coarse=True,
-            # transformed_mesh_path="hand_registered.glb"
+            transformed_mesh_path="hand_registered.glb",
+            fixed_scale=False,
+            test_reflections=True,
+            skip_coarse=False,
+            iterations_coarse=50, 
+            count_source_coarse=3_000, 
+            count_target_coarse=5_000,
+            iterations_fine=100, 
+            count_source_fine=10_000, 
+            count_target_fine=10_000,
         )
 
         # To, from hunyuan generated mesh to Moge pointmap
-        To = align_meshes(
+        # To = align_meshes_rms(
+        #     source_mesh_path=None,
+        #     source_mesh=hunyuan_mesh,
+        #     target_mesh_path=moge_pointmap,
+        #     transformed_mesh_path="hunyuan_registered.glb",
+        #     skip_coarse=True,
+        # )
+
+
+        To = align_meshes_rms(
             source_mesh_path=None,
             source_mesh=hunyuan_mesh,
             target_mesh_path=moge_pointmap,
-            skip_coarse=True,
-            # transformed_mesh_path="hunyuan_registered.glb"
-        )
+            transformed_mesh_path="hunyuan_registered.glb",
+            fixed_scale=False,
+            outliers=0.3,
+            test_reflections=False,
+            skip_coarse=False,
+            fixed_coarse_scale=True,
+            iterations_coarse=50, 
+            count_source_coarse=3_000, 
+            count_target_coarse=7_000,
+            iterations_fine=100, 
+            count_source_fine=10_000, 
+            count_target_fine=10_000,
+        )  # 质心的问题，所以是倾斜的
 
         return Th, To
 

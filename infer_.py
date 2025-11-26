@@ -103,7 +103,7 @@ def main(args):
         args.model_path,
         device=args.device
     )
-    pipeline_shapegen.enable_flashvdm(mc_algo='dmc')  
+    # pipeline_shapegen.enable_flashvdm(mc_algo='dmc')  
 
 
     rembg = BackgroundRemover()

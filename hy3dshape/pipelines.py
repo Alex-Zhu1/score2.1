@@ -31,7 +31,8 @@ from .models.autoencoders import ShapeVAE
 from .models.autoencoders import SurfaceExtractors
 from .utils import logger, synchronize_timer, smart_load_model
 
-from .module.mesh_align_fun import align_meshes
+from .module.mesh_align_fun_rms import align_meshes_rms
+
 from hy3dshape.pipeline_inv import HunyuanInversion
 
 
@@ -760,7 +761,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             dual_guidance=False,
         )
 
-        # 把HOI hand object 图像batch在一起
+        # # 把HOI hand object 图像batch在一起
         # images = [image]
         # has_hand = hand_image is not None
         # has_object = object_image is not None
@@ -788,7 +789,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         #         cond_object = copy.deepcopy(cond)
         #         cond_object['main'] = cond_object['main'][[2, 2 + cfg_offset], ...]
         ########
-
+        # hunyuan对cond的要求是，cond是剧中的，具有语义信息。spatial信息很少。
         images_dict = {'image': image}
         if hand_image is not None:
             images_dict['hand'] = hand_image
@@ -914,6 +915,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                     outputs = self.scheduler.step(noise_pred, t, latents)
 
                     if i == 8:
+                        cond = cond_object
                         # 导出中间 mesh
                         mesh_i = self._export(
                             outputs.pred_original_sample,
@@ -926,15 +928,6 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                             enable_pbar=enable_pbar,
                         )
 
-                        # 进行Phase 2的mesh进一步registration, 这一步得要，上面的To是到norm的结果。这里mesh不能用norm的
-                        To = align_meshes(
-                                        source_mesh_path=None,
-                                        source_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
-                                        target_mesh_path=moge_path,
-                                        skip_coarse=True,
-                                        # transformed_mesh_path="Phase2_hunyuan_registered.glb"
-                                    )  # 这里面的apply_transform是in place 操作，所以直接修改了mesh
-                        
                         # 可视化（可选）
                         if enable_pbar:
                             print(f"[Phase 2] Exporting intermediate mesh at step {i+1}")
@@ -963,13 +956,22 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                                 m_trans.apply_transform(To)
                                 m_trans.export(f"{dir}/phase2_step{i}_to_{time.time()}.glb")
 
+
+                        # 进行Phase 2的mesh进一步registration, 这一步得要，上面的To是到norm的结果。这里mesh不能用norm的
+                        To = align_meshes_rms(
+                                        source_mesh_path=None,
+                                        source_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
+                                        target_mesh_path=moge_path,
+                                        fixed_scale=True,
+                                        skip_coarse=True,
+                                    )
         
                 elif 8 < i < 15 and To is not None:
                     outputs = self.scheduler.step(
                                             noise_pred,
                                             t,
                                             latents,
-                                            enable_guidance_2d=True,
+                                            enable_guidance_2d=False,
                                             To=To,
                                             _export=self._export,
                                             guidance_config={
@@ -997,7 +999,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                             import time
                             if isinstance(mesh_i, list):
                                 for midx, m in enumerate(mesh_i):
-                                    m.apply_transform(To)  # 转到pointmap空间。这里有个问题，为什么inversion用的mesh 和 第一次infer出来的mesh维度不一样呢
+                                    m.apply_transform(To)  # 这里应用，结果直接是 pointmap space
                                     m.export(f"{dir}/phase2_check_step10_{midx}_{time.time()}.glb")
                             else:
                                 mesh_i.export(f"{dir}/phase2_check_step10_{time.time()}.glb")

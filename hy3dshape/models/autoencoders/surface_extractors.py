@@ -144,7 +144,7 @@ class MCSurfaceExtractor(SurfaceExtractor):
 #             faces = faces.detach().cpu().numpy()[:, ::-1]
 #         return vertices, faces
 
-class DMCSurfaceExtractor(SurfaceExtractor):
+class DMCSurfaceExtractor_(SurfaceExtractor):
     def run(self, grid_logit, *, octree_resolution, requires_grad, **kwargs):
         device = grid_logit.device
         if not hasattr(self, 'dmc'):
@@ -172,7 +172,7 @@ class DMCSurfaceExtractor(SurfaceExtractor):
             return vertices, faces
 
 
-class DMCSurfaceExtractor_(SurfaceExtractor):
+class DMCSurfaceExtractor(SurfaceExtractor):
     def run(self, grid_logit, *, octree_resolution, requires_grad, **kwargs):
         device = grid_logit.device
         

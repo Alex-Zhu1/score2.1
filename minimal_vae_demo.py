@@ -27,20 +27,18 @@ vae = ShapeVAE.from_pretrained(
     # pc_sharpedge_size=81920,
 )
 
-# vae.enable_flashvdm_decoder(
-#     enabled=True,
-#     adaptive_kv_selection=True,
-#     topk_mode='mean',
-#     mc_algo='dmc'
-# )
+vae.enable_flashvdm_decoder(
+    enabled=True,
+    adaptive_kv_selection=True,
+    topk_mode='mean',
+    mc_algo='dmc'
+)
 
 loader = SharpEdgeSurfaceLoader(
     num_sharp_points=0,
     num_uniform_points=81920,
 )
-mesh_demo = "/home/haiming.zhu/HOI/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj"
-# mesh_demo = "/home/haiming.zhu/HOI/score2.1/hunyuan_registered.glb"
-# mesh_demo = "/home/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/submodules/hamer/demo_out_1/325_cropped_hoi_1_0.obj"
+mesh_demo = "/home/haiming.zhu/HOI/score2.1/vis_phase1_mid_mesh/check_step10_0_1763867923.84387.glb"  # 也就是说 flexicube会把结果缩放到 -1,1 之间。
 surface = loader(mesh_demo).to('cuda', dtype=torch.float16)
 print(surface.shape)
 

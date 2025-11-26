@@ -42,7 +42,20 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "python": "/home/haiming.zhu/miniconda3/envs/shoi/bin/python", // 替换为你的 Python 解释器路径
+            "python": "/home/haiming.zhu/miniconda3/envs/shoi/bin/python", // 替换为你的 Python 解释器路径\
+            // "args": [
+            //     "/home/haiming.zhu/HOI/score2.1/vis_phase1_mid_mesh/check_step10_0_1763987973.4880714.glb",
+            //     "/home/haiming.zhu/HOI/hy3dshape/outputs_depth/325_cropped_hoi_1/pointcloud.ply",
+            //     "-tp",
+            //     "results/source2target.npy",
+            //     "-tmp",
+            //     "results/source2target.obj",
+            //     "-tref"
+            // ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1"
+            },
         }
     ]
 }
