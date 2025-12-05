@@ -325,7 +325,78 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             )
         
         # Standard Euler update step
-        prev_sample = sample + (sigma_next - sigma) * model_output
+        stride_corr = None
+        # if model_output.shape[0] == 3:   # 这里得找个mask，但是由于cond的spatial是空间不一致的，所以得仔细想想
+        #     v_trg, v_hand, v_src = torch.chunk(model_output, 3, dim=0)
+        #     # v_trg, v_src, V_object = torch.chunk(model_output, 3, dim=0)
+
+        #     # delta_v = v_trg - v_src + v_trg - v_hand
+        #     # model_output = v_trg + delta_v
+
+        #     guidance = v_trg - v_src
+        #     batch_size = guidance.shape[0]
+            
+        #     # mask, [B, C, H, W] for SD3, [B, N, C] for FLUX
+        #     if len(guidance.shape) == 4:
+        #         mask = guidance.mean(dim=1, keepdim=True)
+        #         mask_min = mask.reshape(batch_size, -1).min(dim=1).values.reshape(batch_size, 1, 1, 1)
+        #         mask_max = mask.reshape(batch_size, -1).max(dim=1).values.reshape(batch_size, 1, 1, 1)
+        #     elif len(guidance.shape) == 5:
+        #         mask = guidance.mean(dim=1, keepdim=True)
+        #         mask_min = mask.reshape(batch_size, -1).min(dim=1).values.reshape(batch_size, 1, 1, 1, 1)
+        #         mask_max = mask.reshape(batch_size, -1).max(dim=1).values.reshape(batch_size, 1, 1, 1, 1)
+        #     elif len(guidance.shape) == 3:
+        #         mask = guidance.mean(dim=2, keepdim=True)
+        #         mask_min = mask.reshape(batch_size, -1).min(dim=1).values.reshape(batch_size, 1, 1)
+        #         mask_max = mask.reshape(batch_size, -1).max(dim=1).values.reshape(batch_size, 1, 1)
+        #     mask = (mask - mask_min) / (mask_max - mask_min + 1e-7)
+
+        #     # 保存mask用于debug
+        #     # mask_cpu = mask.detach().cpu()  # 1 4096 1
+        #     # res = mask_cpu.shape[1]
+        #     # res = int(math.sqrt(res))
+        #     # mask_cpu = mask_cpu.reshape(mask_cpu.shape[0], res, res)
+        #     # mask_img = (mask_cpu[0].numpy() * 255).astype(np.uint8)  # 取第一个batch
+        #     # cv.imwrite(f"debug_guidance_mask_step{self._step_index}.png", mask_img)
+
+        #     # 路径
+        #     object_mask_path = '/home/haiming.zhu/HOI/score2.1/demos/object_mask_partial/325_cropped_hoi_1.png'
+        #     object_full_path = '/home/haiming.zhu/HOI/score2.1/demos/object_mask_complete/325_cropped_hoi_1.png'
+
+        #     # 读取并归一化
+        #     full_mask = cv.imread(object_full_path, cv.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
+        #     vis_mask = cv.imread(object_mask_path, cv.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
+
+        #     # 转成 torch tensor
+        #     full_mask_t = torch.from_numpy(full_mask).unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+        #     vis_mask_t = torch.from_numpy(vis_mask).unsqueeze(0).unsqueeze(0)    # [1,1,H,W]
+
+        #     # 插值到 64x64
+        #     res = 64
+        #     full_mask_res = F.interpolate(full_mask_t, size=(res,res), mode='bilinear', align_corners=False)
+        #     vis_mask_res = F.interpolate(vis_mask_t, size=(res,res), mode='bilinear', align_corners=False)
+
+        #     # 计算不可见 mask
+        #     unvis_mask = full_mask_res - vis_mask_res  # [1,1,64,64]
+
+        #     # 展平成 1 x 4096 x 1
+        #     unvis_flat = unvis_mask.view(1, -1, 1)  # [1, 4096, 1]
+        #     unvis_flat = 1. - unvis_flat  # 反转，1 表示可见，0 表示不可见
+
+        #     # mask = unvis_flat.to(device=device, dtype=mask.dtype)
+
+        #     # correction
+        #     stride_corr = 5.0 * (sigma_next - sigma) * (1 + mask) * guidance
+        #     velocity_fusion = mask * v_trg + (1 - mask) * v_src
+        #     # velocity_fusion = v_trg
+        #     stride_corr = torch.cat([stride_corr, stride_corr, stride_corr], dim=0)
+        #     velocity_fusion = torch.cat([velocity_fusion, velocity_fusion, velocity_fusion], dim=0)
+
+
+        if stride_corr is not None:
+            prev_sample = sample + stride_corr + (sigma_next - sigma) * velocity_fusion
+        else:
+            prev_sample = sample + (sigma_next - sigma) * model_output
         prev_sample = prev_sample.to(original_dtype)
 
         # Predict original sample (x_0)

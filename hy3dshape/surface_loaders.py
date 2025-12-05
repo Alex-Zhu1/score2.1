@@ -235,19 +235,19 @@ class SharpEdgeSurfaceLoader:
             
         # mesh加载的Harme的空间，首先转化到 MoGe的image aligned space,然后转化到Hunyuan3D的标准空间
         # === 坐标变换矩阵 ===
-        Th = np.array([
-            [ 1.40274987, -0.05992133, -0.44449514, -2.89761218],
-            [ 0.1245076 ,  1.45416824,  0.19689151,  1.26634568],
-            [ 0.43088787, -0.2251174 ,  1.3901552 ,  8.24536719],
-            [ 0.        ,  0.        ,  0.        ,  1.        ]
-        ])
+        # Th = np.array([
+        #     [ 1.40274987, -0.05992133, -0.44449514, -2.89761218],
+        #     [ 0.1245076 ,  1.45416824,  0.19689151,  1.26634568],
+        #     [ 0.43088787, -0.2251174 ,  1.3901552 ,  8.24536719],
+        #     [ 0.        ,  0.        ,  0.        ,  1.        ]
+        # ])
 
-        To = np.array([
-            [ 0.33563303, -0.0569792 ,  0.13968643, -0.01187149],
-            [ 0.15039468,  0.1531337 , -0.29889793,  0.02222771],
-            [-0.01184779,  0.32971488,  0.1629607 , -0.90017929],
-            [ 0.        ,  0.        ,  0.        ,  1.        ]
-        ])
+        # To = np.array([
+        #     [ 0.33563303, -0.0569792 ,  0.13968643, -0.01187149],
+        #     [ 0.15039468,  0.1531337 , -0.29889793,  0.02222771],
+        #     [-0.01184779,  0.32971488,  0.1629607 , -0.90017929],
+        #     [ 0.        ,  0.        ,  0.        ,  1.        ]
+        # ])
 
         # Too = np.array([
         #     [0.9903009,  0.,         0.,        -0.00431565],
@@ -264,6 +264,13 @@ class SharpEdgeSurfaceLoader:
 
             # mesh.apply_transform(Too)
             # copy.deepcopy(mesh).export("Hamer_transform_to_MoGe_image_aligned.glb")
+
+            # mesh_path = '/home/haiming.zhu/HOI/score2.1/hunyuan_registered.glb'
+            # mesh_hunyuan = trimesh.load(mesh_path, force="mesh", merge_primitives=True, process=False)
+
+            # mesh = trimesh.util.concatenate([mesh, mesh_hunyuan])
+            # mesh.export("Hamer_plus_hunyuan3d.glb")
+
             
             mesh.apply_transform(np.linalg.inv(To))
             copy.deepcopy(mesh).export("Hamer_final_transform_to_Hunyuan3D.glb")

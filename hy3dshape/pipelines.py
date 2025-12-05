@@ -761,67 +761,136 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
             dual_guidance=False,
         )
 
-        # # 把HOI hand object 图像batch在一起
-        # images = [image]
-        # has_hand = hand_image is not None
-        # has_object = object_image is not None
-        # if has_hand:
-        #     images.append(hand_image)
-        # if has_object:
-        #     images.append(object_image)
+        # 把HOI hand object 图像batch在一起
+        images = [image]
+        has_hand = hand_image is not None
+        has_object = object_image is not None
+        if has_hand:
+            images.append(hand_image)
+        if has_object:
+            images.append(object_image)
         
-        # cond_input = self.prepare_image(images)
-        # cond_image = cond_input.pop('image')
-        # cond = self.encode_cond(
-        #     image=cond_image,
-        #     additional_cond_inputs=cond_input,
-        #     do_classifier_free_guidance=do_classifier_free_guidance,
-        #     dual_guidance=False,
-        # )
-        # if has_hand:
-        #     num_images = len(images)
-        #     cfg_offset = num_images if do_classifier_free_guidance else 0
-        #     cond_hoi = copy.deepcopy(cond)
-        #     cond_hoi['main'] = cond_hoi['main'][[0, cfg_offset], ...]
-        #     cond_hand = copy.deepcopy(cond)
-        #     cond_hand['main'] = cond_hand['main'][[1, 1 + cfg_offset], ...]
-        #     if has_object:
-        #         cond_object = copy.deepcopy(cond)
-        #         cond_object['main'] = cond_object['main'][[2, 2 + cfg_offset], ...]
+        cond_input = self.prepare_image(images)
+        cond_image = cond_input.pop('image')
+        cond = self.encode_cond(
+            image=cond_image,
+            additional_cond_inputs=cond_input,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            dual_guidance=False,
+        )
+        if has_hand:
+            num_images = len(images)
+            cfg_offset = num_images if do_classifier_free_guidance else 0
+            cond_hoi = copy.deepcopy(cond)
+            cond_hoi['main'] = cond_hoi['main'][[0, cfg_offset], ...]
+            cond_hand = copy.deepcopy(cond)
+            cond_hand['main'] = cond_hand['main'][[1, 1 + cfg_offset], ...]
+            if has_object:
+                cond_object = copy.deepcopy(cond)
+                cond_object['main'] = cond_object['main'][[2, 2 + cfg_offset], ...]
+
+        def pixelmask_to_patchmask(pixel_mask, patch=14):
+            import torch.nn.functional as F
+            pixel_mask = torch.tensor(pixel_mask)[None, None].float()   # [1,1,518,518]
+            patch_mask = F.max_pool2d(pixel_mask, kernel_size=patch, stride=patch)  # [1,1,37,37]
+            patch_mask = patch_mask.reshape(1, 37*37, 1)   # [1,1369,1]
+
+            cls = torch.zeros(1,1,1)
+            patch_mask = torch.cat([cls, patch_mask], dim=1)  # [1,1370,1]
+            return patch_mask
+
+        
+        # # 把mask 缩放到 518x518 -> 37x37
+        hand_mask = '/home/haiming.zhu/HOI/score2.1/demos/hand_mask/325_cropped_hoi_1.png'
+        object_mask = '/home/haiming.zhu/HOI/score2.1/demos/object_mask_complete/325_cropped_hoi_1.png'
+
+        import cv2 as cv
+        # 1. load small mask (214x214)
+        pixel_obj_mask = cv.imread(object_mask, cv.IMREAD_GRAYSCALE) / 255.
+
+        # 2. resize to DINO input size (518x518)
+        pixel_obj_mask = cv.resize(pixel_obj_mask, (518,518), interpolation=cv.INTER_NEAREST)
+        patch_object_mask = pixelmask_to_patchmask(pixel_obj_mask).to(device)
+
+        hoi_cond = cond_hoi['main'][0]
+        object_cond = cond_object['main'][0] if has_object else 0
+
+        hoi_cond = hoi_cond * (1 - patch_object_mask) + object_cond * patch_object_mask
+
+        # cond_hoi['main'] = torch.cat([hoi_cond, cond_hoi['main'][1:2, ...]], dim=0).to(device).to(dtype)
+
         ########
         # hunyuan对cond的要求是，cond是剧中的，具有语义信息。spatial信息很少。
-        images_dict = {'image': image}
-        if hand_image is not None:
-            images_dict['hand'] = hand_image
-        if object_image is not None:
-            images_dict['object'] = object_image
+        # images_dict = {'image': image}
+        # if hand_image is not None:
+        #     images_dict['hand'] = hand_image
+        # if object_image is not None:
+        #     images_dict['object'] = object_image
 
-        cond_features = {}
-        for name, img in images_dict.items():
-            cond_input = self.prepare_image([img])
-            img_tensor = cond_input.pop('image')
-            cond_features[name] = self.encode_cond(
-                image=img_tensor,
-                additional_cond_inputs=cond_input,
-                do_classifier_free_guidance=do_classifier_free_guidance,
-                dual_guidance=False,
-            )
+        # cond_features = {}
+        # for name, img in images_dict.items():
+        #     cond_input = self.prepare_image([img])
+        #     img_tensor = cond_input.pop('image')
+        #     cond_features[name] = self.encode_cond(
+        #         image=img_tensor,
+        #         additional_cond_inputs=cond_input,
+        #         do_classifier_free_guidance=do_classifier_free_guidance,
+        #         dual_guidance=False,
+        #     )
 
-        cond_hoi = cond_features['image']
-        cond_hand = cond_features.get('hand', None)
-        cond_object = cond_features.get('object', None)
+        # cond_hoi = cond_features['image']
+        # cond_hand = cond_features.get('hand', None)
+        # cond_object = cond_features.get('object', None)
 
-        features_to_concat = []
-        for i in range(2):
-            if cond_hoi is not None:
-                features_to_concat.append(cond_hoi['main'][i:i+1, ...])
-            if cond_hand is not None:
-                features_to_concat.append(cond_hand['main'][i:i+1, ...])
-            if cond_object is not None:
-                features_to_concat.append(cond_object['main'][i:i+1, ...])
+        # # cond_null = copy.deepcopy(cond_ref)
+        # # cond_ = [cond_hoi["main"][[-1], :, :]]  # uncond
+        # # cond_ = torch.cat(cond_ * 2, dim=0)
+        # # cond_null["main"] = cond_
 
-        cond = copy.deepcopy(cond_ref)
-        cond['main'] = torch.cat(features_to_concat, dim=0)
+        # def pixelmask_to_patchmask(pixel_mask, patch=14):
+        #     import torch.nn.functional as F
+        #     pixel_mask = torch.tensor(pixel_mask)[None, None].float()   # [1,1,518,518]
+        #     patch_mask = F.max_pool2d(pixel_mask, kernel_size=patch, stride=patch)  # [1,1,37,37]
+        #     patch_mask = patch_mask.reshape(1, 37*37, 1)   # [1,1369,1]
+
+        #     cls = torch.zeros(1,1,1)
+        #     patch_mask = torch.cat([cls, patch_mask], dim=1)  # [1,1370,1]
+        #     return patch_mask
+
+        
+        # # 把mask 缩放到 518x518 -> 37x37
+        # hand_mask = '/home/haiming.zhu/HOI/score2.1/demos/hand_mask/325_cropped_hoi_1.png'
+        # object_mask = '/home/haiming.zhu/HOI/score2.1/demos/object_mask_complete/325_cropped_hoi_1.png'
+
+        # import cv2 as cv
+        # # 1. load small mask (214x214)
+        # pixel_obj_mask = cv.imread(object_mask, cv.IMREAD_GRAYSCALE) / 255.
+
+        # # 2. resize to DINO input size (518x518)
+        # pixel_obj_mask = cv.resize(pixel_obj_mask, (518,518), interpolation=cv.INTER_NEAREST)
+        # patch_object_mask = pixelmask_to_patchmask(pixel_obj_mask).to(device)
+
+        # hoi_cond = cond_hoi['main'][0]
+        # object_cond = cond_object['main'][0] if object_image is not None else 0
+
+        # hoi_cond = hoi_cond * (1 - patch_object_mask) + object_cond * patch_object_mask
+
+        # cond_hoi['main'] = torch.cat([hoi_cond, cond_hoi['main'][1:2, ...]], dim=0).to(device).to(dtype)
+
+
+        # features_to_concat = []
+        # for i in range(2):
+        #     if cond_hoi is not None:
+        #         features_to_concat.append(cond_hoi['main'][i:i+1, ...])
+        #     if cond_hand is not None:
+        #         features_to_concat.append(cond_hand['main'][i:i+1, ...])
+        #     if cond_object is not None:
+        #         features_to_concat.append(cond_object['main'][i:i+1, ...])
+        #         # features_to_concat.append(cond_null['main'][i:i+1, ...])
+
+
+        # cond = copy.deepcopy(cond_ref)
+        # cond['main'] = torch.cat(features_to_concat, dim=0)
         #######
 
         batch_size = 1
@@ -836,6 +905,7 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         )
         # ========== 准备初始 latents ==========
         latents = self.prepare_latents(batch_size, dtype, device, generator)
+        latents_ori = latents.clone()   
 
         # ========== Guidance 准备 ==========
         guidance = None
@@ -878,9 +948,10 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
         #     self.scheduler.timesteps = None
         
         # ---------- 第二次 sampling ----------
-        double_branch = False
+        double_branch = True
         if double_branch:
             latents = torch.cat([latents] * 3, dim=0)
+            # latents = torch.cat([latents, latents_ori], dim=0)  # for ablation study
             cond = cond
             # un_cond = torch.cat([cond_ref['main'][[-1], :, :], cond_ref['main'][[-1], :, :]], dim=0) 
 
@@ -913,60 +984,62 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                 # update latents velocity field by flow matching scheduler
                 if i <= 8 or i >= 15:
                     outputs = self.scheduler.step(noise_pred, t, latents)
+                    # cond = cond_object  # 恢复cond
+                    # guidance = 5.0
+                    # if i == 8:
+                    #     # 导出中间 mesh
+                    #     mesh_i = self._export(
+                    #         outputs.pred_original_sample,
+                    #         output_type="trimesh",
+                    #         box_v=box_v,
+                    #         mc_level=mc_level,
+                    #         num_chunks=num_chunks,
+                    #         octree_resolution=octree_resolution,
+                    #         mc_algo="dmc",   # 这里用dmc，不用norm查看具体在那个空间
+                    #         enable_pbar=enable_pbar,
+                    #     )
 
-                    if i == 8:
-                        cond = cond_object
-                        # 导出中间 mesh
-                        mesh_i = self._export(
-                            outputs.pred_original_sample,
-                            output_type="trimesh",
-                            box_v=box_v,
-                            mc_level=mc_level,
-                            num_chunks=num_chunks,
-                            octree_resolution=octree_resolution,
-                            mc_algo="dmc",   # 这里用dmc，不用norm查看具体在那个空间
-                            enable_pbar=enable_pbar,
-                        )
+                    #     # 可视化（可选）
+                    #     if enable_pbar:
+                    #         print(f"[Phase 2] Exporting intermediate mesh at step {i+1}")
+                    #         dir = "vis_phase2_mid_mesh"
+                    #         os.makedirs(dir, exist_ok=True)
+                    #         import time
 
-                        # 可视化（可选）
-                        if enable_pbar:
-                            print(f"[Phase 2] Exporting intermediate mesh at step {i+1}")
-                            dir = "vis_phase2_mid_mesh"
-                            os.makedirs(dir, exist_ok=True)
-                            import time
+                    #         if isinstance(mesh_i, list):
+                    #             for midx, m in enumerate(mesh_i):
 
-                            if isinstance(mesh_i, list):
-                                for midx, m in enumerate(mesh_i):
+                    #                 # ----- 1. 保存未应用 To 的 mesh -----
+                    #                 m_orig = m.copy()  # 一定要 copy，否则会被改坏
+                    #                 m_orig.export(f"{dir}/phase2_step{i+1}_orig_{midx}_{time.time()}.glb")
 
-                                    # ----- 1. 保存未应用 To 的 mesh -----
-                                    m_orig = m.copy()  # 一定要 copy，否则会被改坏
-                                    m_orig.export(f"{dir}/phase2_step{i+1}_orig_{midx}_{time.time()}.glb")
+                    #                 # ----- 2. 保存应用 To 之后的 mesh -----
+                    #                 m_trans = m.copy()
+                    #                 m_trans.apply_transform(To)
+                    #                 m_trans.export(f"{dir}/phase2_step{i+1}_to_{midx}_{time.time()}.glb")
 
-                                    # ----- 2. 保存应用 To 之后的 mesh -----
-                                    m_trans = m.copy()
-                                    m_trans.apply_transform(To)
-                                    m_trans.export(f"{dir}/phase2_step{i+1}_to_{midx}_{time.time()}.glb")
+                    #         else:
+                    #             # 单个 mesh 的情况
+                    #             m_orig = mesh_i.copy()
+                    #             m_orig.export(f"{dir}/phase2_step{i}_orig_{time.time()}.glb")
 
-                            else:
-                                # 单个 mesh 的情况
-                                m_orig = mesh_i.copy()
-                                m_orig.export(f"{dir}/phase2_step{i}_orig_{time.time()}.glb")
-
-                                m_trans = mesh_i.copy()
-                                m_trans.apply_transform(To)
-                                m_trans.export(f"{dir}/phase2_step{i}_to_{time.time()}.glb")
+                    #             m_trans = mesh_i.copy()
+                    #             m_trans.apply_transform(To)
+                    #             m_trans.export(f"{dir}/phase2_step{i}_to_{time.time()}.glb")
 
 
                         # 进行Phase 2的mesh进一步registration, 这一步得要，上面的To是到norm的结果。这里mesh不能用norm的
-                        To = align_meshes_rms(
-                                        source_mesh_path=None,
-                                        source_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
-                                        target_mesh_path=moge_path,
-                                        fixed_scale=True,
-                                        skip_coarse=True,
-                                    )
+                        # To = align_meshes_rms(
+                        #                 source_mesh_path=None,
+                        #                 source_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
+                        #                 target_mesh_path=moge_path,
+                        #                 fixed_scale=True,
+                        #                 skip_coarse=True,
+                        #             )
         
                 elif 8 < i < 15 and To is not None:
+                    # cond = cond_hoi  # 恢复cond
+                    # guidance_scale = 7.5
                     outputs = self.scheduler.step(
                                             noise_pred,
                                             t,
@@ -981,28 +1054,28 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
                                                 'fov_x': 41.039776,
                                             }
                                         )
-                    if i == 9:
-                        mesh_i = self._export(
-                            outputs.pred_original_sample,
-                            box_v=box_v,
-                            mc_level=mc_level,
-                            num_chunks=num_chunks,
-                            octree_resolution=octree_resolution,
-                            mc_algo="dmc",
-                            enable_pbar=enable_pbar,
-                        )
+                    # if i == 9:
+                    #     mesh_i = self._export(
+                    #         outputs.pred_original_sample,
+                    #         box_v=box_v,
+                    #         mc_level=mc_level,
+                    #         num_chunks=num_chunks,
+                    #         octree_resolution=octree_resolution,
+                    #         mc_algo="dmc",
+                    #         enable_pbar=enable_pbar,
+                    #     )
 
-                        if enable_pbar:
-                            print(f"[Phase 1] Exporting intermediate mesh at step {i+1}")
-                            dir = "vis_phase2_mid_mesh"
-                            os.makedirs(dir, exist_ok=True)
-                            import time
-                            if isinstance(mesh_i, list):
-                                for midx, m in enumerate(mesh_i):
-                                    m.apply_transform(To)  # 这里应用，结果直接是 pointmap space
-                                    m.export(f"{dir}/phase2_check_step10_{midx}_{time.time()}.glb")
-                            else:
-                                mesh_i.export(f"{dir}/phase2_check_step10_{time.time()}.glb")
+                    #     if enable_pbar:
+                    #         print(f"[Phase 1] Exporting intermediate mesh at step {i+1}")
+                    #         dir = "vis_phase2_mid_mesh"
+                    #         os.makedirs(dir, exist_ok=True)
+                    #         import time
+                    #         if isinstance(mesh_i, list):
+                    #             for midx, m in enumerate(mesh_i):
+                    #                 m.apply_transform(To)  # 这里应用，结果直接是 pointmap space
+                    #                 m.export(f"{dir}/phase2_check_step10_{midx}_{time.time()}.glb")
+                    #         else:
+                    #             mesh_i.export(f"{dir}/phase2_check_step10_{time.time()}.glb")
                 else:
                     outputs = self.scheduler.step(noise_pred, t, latents)
                     
@@ -1074,19 +1147,19 @@ class Hunyuan3DDiTFlowMatchingPipeline(Hunyuan3DDiTPipeline):
 
         # 这里对于同一张图片，进行分割后不同图片recenter结果不对齐
         outputs = []
-        for img in image:
-            output = self.image_processor(img)
-            outputs.append(output)
+        # for img in image:
+        #     output = self.image_processor(img)
+        #     outputs.append(output)
 
         # 记录
-        # outputs = []
-        # ref_bbox, ref_scale = None, None
-        # for i, img in enumerate(image):
-        #     if i == 0:
-        #         output, ref_bbox, ref_scale = self.image_processor(img)
-        #     else:
-        #         output, _, _ = self.image_processor(img, ref_bbox=ref_bbox, ref_scale=ref_scale)
-        #     outputs.append(output)
+        outputs = []
+        ref_bbox, ref_scale = None, None
+        for i, img in enumerate(image):
+            if i == 0:
+                output, ref_bbox, ref_scale = self.image_processor(img)
+            else:
+                output, _, _ = self.image_processor(img, ref_bbox=ref_bbox, ref_scale=ref_scale)
+            outputs.append(output)
 
         cond_input = {k: [] for k in outputs[0].keys()}
         for output in outputs:

@@ -27,7 +27,7 @@ def array_to_tensor(np_array):
     return image_pts
 
 
-class ImageProcessorV211:
+class ImageProcessorV2:
     def __init__(self, size=512, border_ratio=None):
         self.size = size
         self.border_ratio = border_ratio
@@ -122,7 +122,7 @@ class ImageProcessorV211:
 
 
 
-class ImageProcessorV2:
+class ImageProcessorV2o:
     def __init__(self, size=512, border_ratio=None):
         self.size = size
         self.border_ratio = border_ratio

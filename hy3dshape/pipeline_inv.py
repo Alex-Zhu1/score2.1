@@ -215,6 +215,7 @@ class HunyuanInversion:
                         hunyuan_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
                         hamer_mesh=mesh_path,
                         moge_pointmap=moge_path,
+                        # moge_pointmap="/home/haiming.zhu/HOI/hy3dshape/outputs_object_depth/325_cropped_hoi_1/pointcloud.ply",  # moge_path,
                         moge_hand_pointmap=moge_hand_path
                     )
 
@@ -281,7 +282,7 @@ class HunyuanInversion:
             latents = self.vae.scale_factor * latents
 
             # test decode   # 基本上，现在要处理的是，为什么encode decode出的结果和 第一次sampling的mesh对齐不行
-            vis_test_decoding = True
+            vis_test_decoding = False   
             if vis_test_decoding:
                 import time
                 mesh = self._export(
@@ -338,7 +339,10 @@ class HunyuanInversion:
         cond_hand = copy.deepcopy(cond)
 
         if do_classifier_free_guidance:
-            cond_hand = cond
+            # cond_hand = cond
+            cond = [cond["main"][[-1], :, :]]  # uncond
+            cond = torch.cat(cond * 2, dim=0)
+            cond_hand["main"] = cond
         else:
             cond_hand = [cond["main"][[-1], :, :]]  # uncond
 
@@ -384,7 +388,7 @@ class HunyuanInversion:
         Th = align_meshes(
             source_mesh_path=hamer_mesh,
             target_mesh_path=moge_hand_pointmap,
-            transformed_mesh_path="hand_registered.glb",
+            # transformed_mesh_path="hand_registered.glb",
             fixed_scale=False,
             test_reflections=True,
             skip_coarse=False,
@@ -410,7 +414,7 @@ class HunyuanInversion:
             source_mesh_path=None,
             source_mesh=hunyuan_mesh,
             target_mesh_path=moge_pointmap,
-            transformed_mesh_path="hunyuan_registered.glb",
+            # transformed_mesh_path="hunyuan_registered.glb",
             fixed_scale=False,
             outliers=0.3,
             test_reflections=False,
