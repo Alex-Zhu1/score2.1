@@ -29,6 +29,11 @@ loader = SharpEdgeSurfaceLoader(
     num_uniform_points=81920,
 )
 
+# loader = SharpEdgeSurfaceLoader(
+#     num_sharp_points=30720,
+#     num_uniform_points=30720,
+# )
+
 def retrieve_timesteps(
     scheduler,
     num_inference_steps: Optional[int] = None,
@@ -183,7 +188,7 @@ class HunyuanInversion:
                 outputs = phase1_scheduler.step(noise_pred, t, latents)
                 latents = outputs.prev_sample
 
-                if i == 9 or i == num_inference_steps - 1:
+                if i == 19 or i == num_inference_steps - 1:
                     pbar.close()
                     
                     # 导出中间 mesh
@@ -215,7 +220,7 @@ class HunyuanInversion:
                         hunyuan_mesh=mesh_i[0] if isinstance(mesh_i, list) else mesh_i,
                         hamer_mesh=mesh_path,
                         moge_pointmap=moge_path,
-                        # moge_pointmap="/home/haiming.zhu/HOI/hy3dshape/outputs_object_depth/325_cropped_hoi_1/pointcloud.ply",  # moge_path,
+                        # moge_pointmap="/mnt/data/users/haiming.zhu/HOI/hy3dshape/outputs_object_depth/325_cropped_hoi_1/pointcloud.ply",  # moge_path,
                         moge_hand_pointmap=moge_hand_path
                     )
 
@@ -282,7 +287,7 @@ class HunyuanInversion:
             latents = self.vae.scale_factor * latents
 
             # test decode   # 基本上，现在要处理的是，为什么encode decode出的结果和 第一次sampling的mesh对齐不行
-            vis_test_decoding = False   
+            vis_test_decoding = False
             if vis_test_decoding:
                 import time
                 mesh = self._export(

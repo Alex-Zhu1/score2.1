@@ -137,28 +137,28 @@ def generate_dense_grid_points(
 
     return xyz, grid_size, length
 
-# def generate_dense_grid_points(
-#     bbox_min: torch.Tensor,
-#     bbox_max: torch.Tensor,
-#     octree_resolution: int,
-#     indexing: str = "ij",
-# ):
-#     # length = bbox_max - bbox_min  # differentiable if needed
+def generate_dense_grid_points_tensor(
+    bbox_min: torch.Tensor,
+    bbox_max: torch.Tensor,
+    octree_resolution: int,
+    indexing: str = "ij",
+):
+    # length = bbox_max - bbox_min  # differentiable if needed
 
-#     num_cells = octree_resolution
+    num_cells = octree_resolution
 
-#     xs = torch.linspace(bbox_min[0], bbox_max[0], num_cells + 1, device=bbox_min.device)
-#     ys = torch.linspace(bbox_min[1], bbox_max[1], num_cells + 1, device=bbox_min.device)
-#     zs = torch.linspace(bbox_min[2], bbox_max[2], num_cells + 1, device=bbox_min.device)
+    xs = torch.linspace(bbox_min[0], bbox_max[0], num_cells + 1, device=bbox_min.device)
+    ys = torch.linspace(bbox_min[1], bbox_max[1], num_cells + 1, device=bbox_min.device)
+    zs = torch.linspace(bbox_min[2], bbox_max[2], num_cells + 1, device=bbox_min.device)
 
-#     # fully differentiable meshgrid (torch)
-#     xs, ys, zs = torch.meshgrid(xs, ys, zs, indexing=indexing)  # (N,N,N)
+    # fully differentiable meshgrid (torch)
+    xs, ys, zs = torch.meshgrid(xs, ys, zs, indexing=indexing)  # (N,N,N)
 
-#     xyz = torch.stack([xs, ys, zs], dim=-1).reshape(-1, 3)  # (N^3, 3)
+    xyz = torch.stack([xs, ys, zs], dim=-1).reshape(-1, 3)  # (N^3, 3)
 
-#     grid_size = (num_cells + 1, num_cells + 1, num_cells + 1)
+    grid_size = (num_cells + 1, num_cells + 1, num_cells + 1)
 
-#     return xyz, grid_size
+    return xyz, grid_size
 
 # class VanillaVolumeDecoder:
 #     # @torch.no_grad()
@@ -246,7 +246,7 @@ class VanillaVolumeDecoder:
         bbox_min = torch.tensor(bounds[0:3], device=device, dtype=dtype)
         bbox_max = torch.tensor(bounds[3:6], device=device, dtype=dtype)
         
-        xyz_samples, grid_size = generate_dense_grid_points(
+        xyz_samples, grid_size = generate_dense_grid_points_tensor(
             bbox_min=bbox_min,
             bbox_max=bbox_max,
             octree_resolution=octree_resolution,

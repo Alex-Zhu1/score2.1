@@ -162,7 +162,7 @@ if __name__ == "__main__":
     # -----------------------------
     # 1. 加载 mesh
     # -----------------------------
-    mesh = trimesh.load("/home/haiming.zhu/HOI/score2.1/hand_registered.glb", process=False)
+    mesh = trimesh.load("/mnt/data/users/haiming.zhu/HOI/score2.1/hand_registered.glb", process=False)
     if isinstance(mesh, trimesh.Scene):
         mesh = trimesh.util.concatenate(mesh.dump())
     verts = torch.from_numpy(mesh.vertices).float().cuda()
@@ -219,7 +219,7 @@ if __name__ == "__main__":
     # 4. 加载参考图像
     # -----------------------------
     
-    ref_dir = "/home/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_hand_depth/325_cropped_hoi_1"
+    ref_dir = "/mnt/data/users/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_hand_depth/325_cropped_hoi_1"
 
     ref_normal = cv.imread(f"{ref_dir}/rendered_normal.png", cv.IMREAD_COLOR)
     ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB).astype(np.float32) / 255.0

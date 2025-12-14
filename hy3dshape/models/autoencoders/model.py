@@ -210,7 +210,10 @@ class VectsetVAE(nn.Module):
 
     def latents2mesh(self, latents: torch.FloatTensor, **kwargs):
         with synchronize_timer('Volume decoding'):
-            grid_logits = self.volume_decoder(latents, self.geo_decoder, **kwargs)
+            if kwargs.get('octree_resolution') == 64:
+                grid_logits = self.volume_decoder1(latents, self.geo_decoder, **kwargs)
+            else:
+                grid_logits = self.volume_decoder(latents, self.geo_decoder, **kwargs)
         with synchronize_timer('Surface extraction'):
             outputs = self.surface_extractor(grid_logits, **kwargs)
         return outputs
@@ -230,6 +233,8 @@ class VectsetVAE(nn.Module):
             if mc_algo not in SurfaceExtractors.keys():
                 raise ValueError(f'Unsupported mc_algo {mc_algo}, available:{list(SurfaceExtractors.keys())}')
             self.surface_extractor = SurfaceExtractors[mc_algo]()
+
+            self.volume_decoder1 = VanillaVolumeDecoder()
         else:
             self.volume_decoder = VanillaVolumeDecoder()
             self.surface_extractor = MCSurfaceExtractor()

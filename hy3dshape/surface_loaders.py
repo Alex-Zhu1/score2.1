@@ -265,7 +265,7 @@ class SharpEdgeSurfaceLoader:
             # mesh.apply_transform(Too)
             # copy.deepcopy(mesh).export("Hamer_transform_to_MoGe_image_aligned.glb")
 
-            # mesh_path = '/home/haiming.zhu/HOI/score2.1/hunyuan_registered.glb'
+            # mesh_path = '/mnt/data/users/haiming.zhu/HOI/score2.1/hunyuan_registered.glb'
             # mesh_hunyuan = trimesh.load(mesh_path, force="mesh", merge_primitives=True, process=False)
 
             # mesh = trimesh.util.concatenate([mesh, mesh_hunyuan])

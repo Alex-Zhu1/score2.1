@@ -38,7 +38,7 @@ loader = SharpEdgeSurfaceLoader(
     num_sharp_points=0,
     num_uniform_points=81920,
 )
-mesh_demo = "/home/haiming.zhu/HOI/score2.1/vis_phase1_mid_mesh/check_step10_0_1763867923.84387.glb"  # 也就是说 flexicube会把结果缩放到 -1,1 之间。
+mesh_demo = "/mnt/data/users/haiming.zhu/HOI/score2.1/vis_phase1_mid_mesh/check_step10_0_1763867923.84387.glb"  # 也就是说 flexicube会把结果缩放到 -1,1 之间。
 surface = loader(mesh_demo).to('cuda', dtype=torch.float16)
 print(surface.shape)
 

@@ -19,7 +19,7 @@ pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
 pipeline.to('cuda:0')
 
 # Download an example image.
-path = '/home/haiming.zhu/HOI/score2.1/325_cropped_hoi_1.png'
+path = '/mnt/data/users/haiming.zhu/HOI/score2.1/325_cropped_hoi_1.png'
 # cond = Image.open(path)
 cond = Image.open(requests.get(
     "https://aidilayce.github.io/FollowMyHold-page/models/wild/4_full_image_1.png",

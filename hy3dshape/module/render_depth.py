@@ -141,7 +141,7 @@ def fov_to_K_normalized(fov_x_deg, width, height):
 # 主入口：加载 mesh，渲染并保存 depth/disparity 可视化
 # ===========================================================
 if __name__ == "__main__":
-    mesh_path = "/home/haiming.zhu/hoi/InvScore/hunyuan_registered.glb"
+    mesh_path = "/mnt/data/users/haiming.zhu/hoi/InvScore/hunyuan_registered.glb"
     scene_or_mesh = trimesh.load(mesh_path, process=False)
 
     if isinstance(scene_or_mesh, trimesh.Scene):

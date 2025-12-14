@@ -360,8 +360,8 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         #     # cv.imwrite(f"debug_guidance_mask_step{self._step_index}.png", mask_img)
 
         #     # 路径
-        #     object_mask_path = '/home/haiming.zhu/HOI/score2.1/demos/object_mask_partial/325_cropped_hoi_1.png'
-        #     object_full_path = '/home/haiming.zhu/HOI/score2.1/demos/object_mask_complete/325_cropped_hoi_1.png'
+        #     object_mask_path = '/mnt/data/users/haiming.zhu/HOI/score2.1/demos/object_mask_partial/325_cropped_hoi_1.png'
+        #     object_full_path = '/mnt/data/users/haiming.zhu/HOI/score2.1/demos/object_mask_complete/325_cropped_hoi_1.png'
 
         #     # 读取并归一化
         #     full_mask = cv.imread(object_full_path, cv.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
@@ -475,7 +475,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             self._guidance_pose_params_initialized_at_step = self._step_index
 
             # === Load reference images ===
-            ref_dir = config.get("reference_dir", "/home/haiming.zhu/HOI/Hunyuan3D-2/preprocess/outputs_depth/325_cropped_hoi_1")
+            ref_dir = config.get("reference_dir", "/mnt/data/users/haiming.zhu/hoi/Hunyuan3D-2.1/hy3dshape/outputs_depth/325_cropped_hoi_1")
             
             ref_normal = cv.imread(f"{ref_dir}/rendered_normal.png", cv.IMREAD_COLOR)
             ref_normal = cv.cvtColor(ref_normal, cv.COLOR_BGR2RGB).astype(np.float32) / 255.0
@@ -494,12 +494,12 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         scale = self._guidance_pose_params["scale"]
         translation = self._guidance_pose_params["translation"]
 
-        optimizer = torch.optim.Adam([
+        optimizer = torch.optim.AdamW([
             {'params': [para_velocity], 'lr': lr_velocity},
             {'params': [scale], 'lr': lr_scale},
             {'params': [rotvec], 'lr': lr_rotation},
             {'params': [translation], 'lr': lr_translation},
-        ])
+        ], eps=1e-8)
 
 
         if self._step_index == 9:
@@ -507,7 +507,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             lr_velocity = 1e-4
             lr_scale = 0.0005
             lr_rotation = 0.005
-            lr_translation = 0.0001
+            lr_translation = 0.00000001
 
         # === Optimization Loop ===
         for step in range(num_steps):
@@ -523,14 +523,16 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                     x1.to(original_dtype),
                     output_type="mesh",
                     mc_algo="dmc",
-                    num_chunks=2000,
+                    octree_resolution=64,
+                    num_chunks=8000,
                     enable_pbar=False,
                     requires_grad=True,
                     use_checkpoint=True
                 )
 
-            vertices, faces = outputs[0]
-            faces = faces.to(torch.int32)
+            vertices, faces = outputs[0]  # flexi 输出
+
+            faces = faces.to(torch.int32)  # nvdiffrast 要求 int32
 
             # Apply transformation, 利用To转化到pointsmap坐标系, 再利用transform做posed
             if not isinstance(To, torch.Tensor):
@@ -543,18 +545,18 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             vertices_homo = (vertices_homo @ To.T)  @ transform.T
             vertices_transformed = vertices_homo[:, :3] / vertices_homo[:, 3:4]
 
-            # if step % 5 == 0:
-            #     with torch.no_grad():
-            #         import os
-            #         debug_dir = "./debug_2d_guidance"
-            #         if not os.path.exists(debug_dir):
-            #             os.makedirs(debug_dir, exist_ok=True)
-            #         v_vis = vertices_transformed.clone().detach().cpu().numpy()
-            #         f_vis = faces.clone().detach().cpu().numpy()
-            #         # 如果你的渲染器是逆时针为正，且画面全黑，试试反转：
-            #         f_vis = np.ascontiguousarray(f_vis)[:, ::-1]
-            #         v_vis = v_vis.astype(np.float32)
-            #         trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
+            if step % 5 == 0:
+                with torch.no_grad():
+                    import os
+                    debug_dir = "./debug_2d_guidance"
+                    if not os.path.exists(debug_dir):
+                        os.makedirs(debug_dir, exist_ok=True)
+                    v_vis = vertices_transformed.clone().detach().cpu().numpy()
+                    f_vis = faces.clone().detach().cpu().numpy()
+                    # 如果你的渲染器是逆时针为正，且画面全黑，试试反转：
+                    f_vis = np.ascontiguousarray(f_vis)[:, ::-1]
+                    v_vis = v_vis.astype(np.float32)
+                    trimesh.Trimesh(v_vis, f_vis).export(f"./debug_2d_guidance/timestep{self._step_index}_opt{step:03d}.glb")
 
             # idx = torch.arange(faces.shape[1]-1, -1, -1, device=faces.device)
             # faces = faces[:, idx]
@@ -582,9 +584,9 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                     weight_norm * loss_norm
                     + weight_sil * loss_sil
                     + weight_disp * loss_disp
-                    + weight_reg_scale * loss_reg_scale
+                    # + weight_reg_scale * loss_reg_scale
                     + weight_reg_trans * loss_reg_trans
-                    + weight_reg_rot * loss_reg_rot
+                    # + weight_reg_rot * loss_reg_rot
                 )
 
             loss.backward()

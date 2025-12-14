@@ -69,6 +69,7 @@ def load_and_process_image(image_path: str, rembg: BackgroundRemover, output_dir
     """
     logger.info(f"Loading and processing image: {image_path}")
     image = Image.open(image_path).convert("RGBA")
+
     image = rembg(image)
     
     # Save background-removed image
@@ -101,7 +102,8 @@ def main(args):
     logger.info("Loading Hunyuan3D model...")
     pipeline_shapegen = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         args.model_path,
-        device=args.device
+        device=args.device,
+        # subfolder='hunyuan3d-dit-v2-0',  # subfolder='hunyuan3d-dit-v2-1',
     )
     pipeline_shapegen.enable_flashvdm(mc_algo='dmc')  
 
@@ -194,7 +196,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ref_path",
         type=str,
-        default='/home/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png',
+        default='/mnt/data/users/haiming.zhu/hoi/InvScore/data/325_cropped_hoi_1.png',
         help="Path to the reference image"
     )
     parser.add_argument(

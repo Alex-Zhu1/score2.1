@@ -197,7 +197,7 @@ class CrossAttention(nn.Module):
 
         _, s2, c = y.shape  # [b, s2, 1024]
         q = self.to_q(x)
-        k = self.to_k(y)
+        k = self.to_k(y)    # 这里
         v = self.to_v(y)
 
         kv = torch.cat((k, v), dim=-1)
